@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; connect-src ws://localhost:* ws://127.0.0.1:*">
+  <meta name="color-scheme" content="dark">
+  <title>TossInvest 설정</title>
+  <link rel="stylesheet" href="quote.css">
+</head>
+<body>
+  <main>
+    <section>
+      <h1>TossInvest</h1>
+      <p class="notice">토스증권 Open API를 사용하는 비공식 플러그인입니다.</p>
+      <label>Client ID<input id="clientId" autocomplete="off" spellcheck="false"></label>
+      <label>Client Secret<input id="clientSecret" type="password" autocomplete="off" spellcheck="false"></label>
+      <p class="hint">자격증명은 이 컴퓨터의 Stream Deck 설정에 저장됩니다. 저장소나 로그로 전송하지 않습니다.</p>
+      <label>화면 갱신<select id="renderMode"><option value="realtime">실시간 (약 100ms)</option><option value="economy">절약형 (1초)</option></select></label>
+      <div class="buttons"><button id="saveGlobal">전역 설정 저장</button><button id="testGlobal" class="secondary">연결 테스트</button></div>
+      <output id="globalStatus" aria-live="polite"></output>
+    </section>
+    <section>
+      <h2>시세 키 설정</h2>
+      <label>종목 코드<input id="symbol" placeholder="005930 또는 AAPL" autocomplete="off" spellcheck="false"></label>
+      <div class="buttons"><button id="resolve">종목 확인</button></div>
+      <div id="resolved" class="resolved" hidden></div>
+      <label>키 누르기 동작<select id="keyBehavior"><option value="refresh">즉시 새로고침</option><option value="open">토스증권 종목 열기</option><option value="none">동작 없음</option></select></label>
+      <p class="hint">등락은 직전 거래일 일봉 종가 기준입니다. 장외·휴장 중에는 마지막 체결 시각을 표시합니다.</p>
+      <output id="actionStatus" aria-live="polite"></output>
+    </section>
+    <footer><a href="https://developers.tossinvest.com/docs" target="_blank" rel="noreferrer">토스증권 Open API 문서</a></footer>
+  </main>
+  <script src="quote.js"></script>
+</body>
+</html>
