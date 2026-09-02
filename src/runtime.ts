@@ -1,6 +1,18 @@
 import type { Action } from "@elgato/streamdeck";
-import type { GlobalSettingsV1, QuoteActionSettingsV1, QuoteView, StockInfo, TradeTick } from "./types.js";
-import { migrateActionSettings, migrateGlobalSettings, normalizeSymbol } from "./settings.js";
+import type {
+  Candle,
+  GlobalSettingsV1,
+  Market,
+  QuoteActionSettingsV1,
+  QuoteView,
+  StockInfo,
+  TradeTick,
+} from "./types.js";
+import {
+  migrateActionSettings,
+  migrateGlobalSettings,
+  normalizeSymbol,
+} from "./settings.js";
 import { renderQuoteCard, svgToDataUri } from "./renderer/card.js";
 import { RenderScheduler } from "./renderer/scheduler.js";
 import { AuthSession } from "./toss/auth-session.js";
@@ -26,9 +38,14 @@ interface QuoteState {
   info?: StockInfo;
   lastPrice?: string;
   referencePrice?: string;
+  highPrice?: string;
+  lowPrice?: string;
+  candles?: Candle[];
+  sparkline?: number[];
   timestamp?: string | null;
   status: QuoteView["status"];
   message?: string;
+  refreshing?: boolean;
 }
 
 export interface PiSender {
@@ -50,14 +67,18 @@ export class QuoteRuntime {
   private refreshTimer?: ReturnType<typeof setTimeout>;
   private destroyed = false;
 
-  constructor(options: {
-    readonly piSender?: PiSender;
-    readonly settings?: unknown;
-    readonly fetch?: typeof globalThis.fetch;
-    readonly socketUrl?: string;
-    readonly WebSocketImpl?: ConstructorParameters<typeof TossWebSocket>[1]["WebSocketImpl"];
-    readonly openUrl?: (url: string) => Promise<void>;
-  } = {}) {
+  constructor(
+    options: {
+      readonly piSender?: PiSender;
+      readonly settings?: unknown;
+      readonly fetch?: typeof globalThis.fetch;
+      readonly socketUrl?: string;
+      readonly WebSocketImpl?: ConstructorParameters<
+        typeof TossWebSocket
+      >[1]["WebSocketImpl"];
+      readonly openUrl?: (url: string) => Promise<void>;
+    } = {},
+  ) {
     this.globalSettings = migrateGlobalSettings(options.settings);
     this.auth = new AuthSession(this.globalSettings, { fetch: options.fetch });
     this.rest = new TossRestClient(this.auth, { fetch: options.fetch });
@@ -79,7 +100,10 @@ export class QuoteRuntime {
         const quote = this.quotes.get(symbol);
         if (quote && !quote.lastPrice) {
           quote.status = "invalid-symbol";
-          quote.message = reason === "stock-not-found" ? "종목을 찾을 수 없습니다." : "구독할 수 없는 종목입니다.";
+          quote.message =
+            reason === "stock-not-found"
+              ? "종목을 찾을 수 없습니다."
+              : "구독할 수 없는 종목입니다.";
           void this.renderAll();
         }
       },
@@ -87,8 +111,12 @@ export class QuoteRuntime {
     this.schedulePeriodicRefresh();
   }
 
-  get settings(): GlobalSettingsV1 { return this.globalSettings; }
-  get actionUuid(): string { return ACTION_UUID; }
+  get settings(): GlobalSettingsV1 {
+    return this.globalSettings;
+  }
+  get actionUuid(): string {
+    return ACTION_UUID;
+  }
 
   async updateGlobalSettings(raw: unknown): Promise<void> {
     const next = migrateGlobalSettings(raw);
@@ -98,7 +126,11 @@ export class QuoteRuntime {
     if (previousMode !== next.renderMode) {
       const interval = next.renderMode === "economy" ? 1_000 : 100;
       for (const binding of this.bindings.values()) {
-        this.scheduler.updateInterval(binding.action.id, binding.generation, interval);
+        this.scheduler.updateInterval(
+          binding.action.id,
+          binding.generation,
+          interval,
+        );
       }
       await this.renderAll();
     }
@@ -110,7 +142,10 @@ export class QuoteRuntime {
       }
       await this.refreshAll();
     }
-    await this.sendPush({ type: "global-settings", settings: this.publicGlobalSettings() });
+    await this.sendPush({
+      type: "global-settings",
+      settings: this.publicGlobalSettings(),
+    });
   }
 
   async appear(action: ActionPort, rawSettings: unknown): Promise<void> {
@@ -123,7 +158,10 @@ export class QuoteRuntime {
     await this.refreshAll();
   }
 
-  async settingsChanged(action: ActionPort, rawSettings: unknown): Promise<void> {
+  async settingsChanged(
+    action: ActionPort,
+    rawSettings: unknown,
+  ): Promise<void> {
     const previous = this.bindings.get(action.id);
     if (previous) this.scheduler.remove(action.id, previous.generation);
     const settings = migrateActionSettings(rawSettings);
@@ -146,13 +184,39 @@ export class QuoteRuntime {
   async keyDown(action: ActionPort): Promise<void> {
     const binding = this.bindings.get(action.id);
     if (!binding) return;
-    if (binding.settings.keyBehavior === "open" && binding.settings.symbol && binding.settings.market) {
-      const url = binding.settings.market === "KR"
-        ? `https://www.tossinvest.com/stocks/A${binding.settings.symbol}/order`
-        : `https://www.tossinvest.com/stocks/${binding.settings.symbol}/order`;
+    if (
+      binding.settings.keyBehavior === "open" &&
+      binding.settings.symbol &&
+      binding.settings.market
+    ) {
+      const url =
+        binding.settings.market === "KR"
+          ? `https://www.tossinvest.com/stocks/A${binding.settings.symbol}/order`
+          : `https://www.tossinvest.com/stocks/${binding.settings.symbol}/order`;
       await this.openUrl(url);
+    } else if (binding.settings.keyBehavior === "toggle-view") {
+      const current = binding.settings.viewMode || "chart";
+      binding.settings.viewMode = current === "chart" ? "detail" : "chart";
+      await this.renderAction(action.id, true);
+      await this.sendPush({
+        type: "settings-updated",
+        actionId: action.id,
+        settings: binding.settings,
+      });
     } else if (binding.settings.keyBehavior === "refresh") {
-      await this.refreshSymbol(binding.settings.symbol, true);
+      const quote = this.quotes.get(binding.settings.symbol);
+      if (quote) {
+        quote.refreshing = true;
+        await this.renderAction(action.id, true);
+      }
+      try {
+        await this.refreshSymbol(binding.settings.symbol, true);
+      } finally {
+        if (quote) {
+          quote.refreshing = false;
+          await this.renderAction(action.id, true);
+        }
+      }
     }
   }
 
@@ -168,7 +232,39 @@ export class QuoteRuntime {
       market,
       currency: info.currency,
       keyBehavior: "refresh",
+      colorTheme: "kr",
+      showChart: true,
+      viewMode: "chart",
+      showCurrencySymbol: true,
     };
+  }
+
+  preview(rawSettings: unknown): string {
+    const settings = migrateActionSettings(rawSettings);
+    const view = this.viewFor(settings);
+    if (view.status !== "ready" && settings.symbol) {
+      const sampleView: QuoteView = {
+        ...view,
+        status: "ready",
+        name: view.name || settings.name || settings.symbol,
+        lastPrice:
+          view.lastPrice ?? (settings.currency === "USD" ? "180.50" : "72000"),
+        referencePrice:
+          view.referencePrice ??
+          (settings.currency === "USD" ? "175.00" : "70500"),
+        highPrice:
+          view.highPrice ?? (settings.currency === "USD" ? "182.50" : "73500"),
+        lowPrice:
+          view.lowPrice ?? (settings.currency === "USD" ? "174.00" : "70000"),
+        sparkline:
+          view.sparkline ??
+          (settings.currency === "USD"
+            ? [172, 174, 173, 176, 178, 180.5]
+            : [69000, 70000, 69500, 70500, 71000, 72000]),
+      };
+      return svgToDataUri(renderQuoteCard(sampleView));
+    }
+    return svgToDataUri(renderQuoteCard(view));
   }
 
   async testCredentials(): Promise<void> {
@@ -182,7 +278,11 @@ export class QuoteRuntime {
   async sendPush(message: unknown): Promise<void> {
     if (!this.piSender) return;
     for (const actionId of this.bindings.keys()) {
-      try { await this.piSender(actionId, message); } catch { /* PI may have closed */ }
+      try {
+        await this.piSender(actionId, message);
+      } catch {
+        /* PI may have closed */
+      }
     }
   }
 
@@ -215,12 +315,21 @@ export class QuoteRuntime {
 
   private async refreshAll(): Promise<void> {
     if (this.destroyed) return;
-    const symbols = [...new Set([...this.bindings.values()].map((binding) => binding.settings.symbol).filter(Boolean))];
+    const symbols = [
+      ...new Set(
+        [...this.bindings.values()]
+          .map((binding) => binding.settings.symbol)
+          .filter(Boolean),
+      ),
+    ];
     if (symbols.length === 0) return;
     if (!this.auth.isConfigured()) {
       for (const symbol of symbols) {
         const quote = this.ensureQuote(symbol);
-        if (quote) { quote.status = "auth-required"; quote.message = "Property Inspector에서 API 인증정보를 입력하세요."; }
+        if (quote) {
+          quote.status = "auth-required";
+          quote.message = "Property Inspector에서 API 인증정보를 입력하세요.";
+        }
       }
       await this.renderAll();
       return;
@@ -231,8 +340,12 @@ export class QuoteRuntime {
         this.rest.getStocks(symbols),
         this.rest.getPrices(symbols),
       ]);
-      const infosBySymbol = new Map(infos.map((info) => [info.symbol.toUpperCase(), info]));
-      const pricesBySymbol = new Map(prices.map((price) => [price.symbol.toUpperCase(), price]));
+      const infosBySymbol = new Map(
+        infos.map((info) => [info.symbol.toUpperCase(), info]),
+      );
+      const pricesBySymbol = new Map(
+        prices.map((price) => [price.symbol.toUpperCase(), price]),
+      );
       for (const symbol of symbols) {
         const quote = this.ensureQuote(symbol);
         if (!quote) continue;
@@ -248,10 +361,39 @@ export class QuoteRuntime {
         quote.timestamp = price.timestamp;
         quote.status = "ready";
         try {
-          const candles = await this.rest.getCandles(symbol, 5);
-          quote.referencePrice = selectReferencePrice(candles, price.timestamp);
+          const candles = await this.rest.getCandles(symbol, 10);
+          quote.candles = candles;
+          const market: Market =
+            info.market === "US" || info.currency === "USD" ? "US" : "KR";
+          quote.referencePrice = selectReferencePrice(
+            candles,
+            price.timestamp,
+            market,
+          );
+
+          const chronological = [...candles].sort((a, b) =>
+            a.timestamp.localeCompare(b.timestamp),
+          );
+          const sparkline = chronological
+            .map((c) => Number(c.closePrice))
+            .filter((val) => Number.isFinite(val));
+          if (price.lastPrice && Number.isFinite(Number(price.lastPrice))) {
+            if (sparkline.length > 0) {
+              sparkline[sparkline.length - 1] = Number(price.lastPrice);
+            } else {
+              sparkline.push(Number(price.lastPrice));
+            }
+          }
+          quote.sparkline = sparkline;
+
+          const latestCandle = chronological[chronological.length - 1];
+          if (latestCandle) {
+            quote.highPrice = latestCandle.highPrice;
+            quote.lowPrice = latestCandle.lowPrice;
+          }
         } catch {
           quote.referencePrice = undefined;
+          quote.sparkline = undefined;
         }
       }
       this.reconcileSubscriptions();
@@ -261,7 +403,10 @@ export class QuoteRuntime {
       for (const symbol of symbols) {
         const quote = this.ensureQuote(symbol);
         if (quote && !quote.lastPrice) {
-          quote.status = error instanceof TossError && error.code === "INVALID_SYMBOL" ? "invalid-symbol" : "stale";
+          quote.status =
+            error instanceof TossError && error.code === "INVALID_SYMBOL"
+              ? "invalid-symbol"
+              : "stale";
           quote.message = message;
         }
       }
@@ -269,12 +414,16 @@ export class QuoteRuntime {
     }
   }
 
-  private async refreshSymbol(symbol: string, immediate = false): Promise<void> {
+  private async refreshSymbol(
+    symbol: string,
+    immediate = false,
+  ): Promise<void> {
     if (!symbol) return this.renderAll();
     await this.refreshAll();
     if (immediate) {
       for (const binding of this.bindings.values()) {
-        if (binding.settings.symbol === symbol) await this.renderAction(binding.action.id, true);
+        if (binding.settings.symbol === symbol)
+          await this.renderAction(binding.action.id, true);
       }
     }
   }
@@ -287,7 +436,11 @@ export class QuoteRuntime {
       const info = this.quotes.get(symbol)?.info;
       let market = binding.settings.market;
       if (!market && info) {
-        try { market = this.rest.marketFor(info); } catch { market = undefined; }
+        try {
+          market = this.rest.marketFor(info);
+        } catch {
+          market = undefined;
+        }
       }
       if (!symbol || !market || seen.has(symbol)) continue;
       seen.add(symbol);
@@ -303,14 +456,26 @@ export class QuoteRuntime {
     quote.timestamp = tick.timestamp;
     quote.status = "ready";
     quote.message = undefined;
+    if (quote.sparkline && quote.sparkline.length > 0) {
+      const priceNum = Number(tick.price);
+      if (Number.isFinite(priceNum)) {
+        const updated = [...quote.sparkline];
+        updated[updated.length - 1] = priceNum;
+        quote.sparkline = updated;
+      }
+    }
     void this.renderAll();
   }
 
   private async renderAll(): Promise<void> {
-    for (const binding of this.bindings.values()) await this.renderAction(binding.action.id);
+    for (const binding of this.bindings.values())
+      await this.renderAction(binding.action.id);
   }
 
-  private async renderAction(actionId: string, immediate = false): Promise<void> {
+  private async renderAction(
+    actionId: string,
+    immediate = false,
+  ): Promise<void> {
     const binding = this.bindings.get(actionId);
     if (!binding) return;
     const view = this.viewFor(binding.settings);
@@ -319,13 +484,27 @@ export class QuoteRuntime {
       priority: immediate ? "immediate" : "normal",
       key,
       render: () => svgToDataUri(renderQuoteCard(view)),
-      commit: (image) => binding.action.setImage(image),
+      commit: (image) => {
+        void binding.action.setImage(image);
+        void this.sendPush({
+          type: "preview",
+          actionId,
+          image,
+        });
+      },
     });
   }
 
   private viewFor(settings: QuoteActionSettingsV1): QuoteView {
     const quote = this.quotes.get(settings.symbol);
-    if (!settings.symbol) return { symbol: "", name: "TossInvest", currency: "", status: "auth-required", message: "종목 코드를 설정하세요." };
+    if (!settings.symbol)
+      return {
+        symbol: "",
+        name: "TossInvest",
+        currency: "",
+        status: "auth-required",
+        message: "종목 코드를 설정하세요.",
+      };
     return {
       symbol: settings.symbol,
       name: quote?.info?.name ?? settings.name,
@@ -333,9 +512,17 @@ export class QuoteRuntime {
       currency: quote?.info?.currency ?? settings.currency,
       lastPrice: quote?.lastPrice,
       referencePrice: quote?.referencePrice,
+      highPrice: quote?.highPrice,
+      lowPrice: quote?.lowPrice,
       timestamp: quote?.timestamp,
       status: quote?.status ?? "connecting",
       message: quote?.message,
+      colorTheme: settings.colorTheme,
+      showChart: settings.showChart,
+      viewMode: settings.viewMode,
+      showCurrencySymbol: settings.showCurrencySymbol,
+      sparkline: quote?.sparkline,
+      refreshing: quote?.refreshing,
     };
   }
 
@@ -353,6 +540,8 @@ export class QuoteRuntime {
   }
 }
 
-export function createRuntime(options: ConstructorParameters<typeof QuoteRuntime>[0] = {}): QuoteRuntime {
+export function createRuntime(
+  options: ConstructorParameters<typeof QuoteRuntime>[0] = {},
+): QuoteRuntime {
   return new QuoteRuntime(options);
 }

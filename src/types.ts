@@ -2,7 +2,9 @@ import type { JsonObject } from "@elgato/utils";
 
 export type Market = "KR" | "US";
 export type RenderMode = "realtime" | "economy";
-export type KeyBehavior = "refresh" | "open" | "none";
+export type KeyBehavior = "refresh" | "open" | "toggle-view" | "none";
+export type ColorTheme = "kr" | "global";
+export type ViewMode = "chart" | "detail";
 
 export type GlobalSettingsV1 = JsonObject & {
   schemaVersion: 1;
@@ -18,6 +20,10 @@ export type QuoteActionSettingsV1 = JsonObject & {
   market?: Market;
   currency: string;
   keyBehavior: KeyBehavior;
+  colorTheme?: ColorTheme;
+  showChart?: boolean;
+  viewMode?: ViewMode;
+  showCurrencySymbol?: boolean;
 };
 
 export interface StockInfo {
@@ -38,8 +44,12 @@ export interface PriceQuote {
 
 export interface Candle {
   readonly timestamp: string;
+  readonly openPrice?: string;
+  readonly highPrice?: string;
+  readonly lowPrice?: string;
   readonly closePrice: string;
-  readonly currency: string;
+  readonly volume?: string;
+  readonly currency?: string;
 }
 
 export type QuoteStatus =
@@ -57,9 +67,17 @@ export interface QuoteView {
   readonly currency: string;
   readonly lastPrice?: string;
   readonly referencePrice?: string;
+  readonly highPrice?: string;
+  readonly lowPrice?: string;
   readonly timestamp?: string | null;
   readonly status: QuoteStatus;
   readonly message?: string;
+  readonly colorTheme?: ColorTheme;
+  readonly showChart?: boolean;
+  readonly viewMode?: ViewMode;
+  readonly showCurrencySymbol?: boolean;
+  readonly sparkline?: readonly number[];
+  readonly refreshing?: boolean;
 }
 
 export interface TradeTick {
