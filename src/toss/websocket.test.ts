@@ -25,7 +25,7 @@ describe("Toss WebSocket", () => {
   it("declares full-replace subscriptions, sends PING, and dispatches ticks", async () => {
     vi.useFakeTimers();
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(JSON.stringify({ access_token: "token", expires_in: 86400 })));
-    const auth = new AuthSession({ schemaVersion: 1, clientId: "client", clientSecret: "secret", renderMode: "realtime" }, { fetch });
+    const auth = new AuthSession({ schemaVersion: 1, clientId: "client", clientSecret: "secret", renderMode: "realtime", signalDurationSec: 5 }, { fetch });
     const ticks: string[] = [];
     const socket = new TossWebSocket(auth, {
       WebSocketImpl: FakeSocket as unknown as typeof WebSocket,

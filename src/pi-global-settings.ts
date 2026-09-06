@@ -5,6 +5,7 @@ export interface GlobalSettingsInput {
   readonly clientId?: unknown;
   readonly clientSecret?: unknown;
   readonly renderMode?: unknown;
+  readonly signalDurationSec?: unknown;
 }
 
 export interface GlobalSettingsRuntime {
@@ -33,6 +34,7 @@ export function candidateGlobalSettings(
     clientSecret:
       rawSecret && rawSecret !== "••••••••" ? rawSecret : existing.clientSecret,
     renderMode: input.renderMode,
+    signalDurationSec: input.signalDurationSec ?? existing.signalDurationSec,
   });
 }
 

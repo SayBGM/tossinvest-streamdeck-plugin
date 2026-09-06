@@ -165,6 +165,10 @@
     $("renderMode").value =
       settings.renderMode === "economy" ? "economy" : "realtime";
 
+    if ($("signalDuration")) {
+      $("signalDuration").value = String(settings.signalDurationSec || 5);
+    }
+
     var savedBadge = $("savedKeyBadge");
     var globalFields = $("globalFields");
     var savedBadgeClientId = $("savedBadgeClientId");
@@ -477,6 +481,7 @@
       clientId: clientId,
       clientSecret: clientSecret,
       renderMode: $("renderMode").value,
+      signalDurationSec: Number($("signalDuration").value),
     });
     state.globalSaveRequestId = reqId;
     setBusy("global", true);

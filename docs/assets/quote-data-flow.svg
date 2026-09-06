@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">TossInvest Stream Deck 시세 데이터 흐름</title>
+  <desc id="desc">공식 Toss Invest Open API에서 REST와 WebSocket 시세를 받아 안전한 렌더 큐를 거쳐 Stream Deck 키로 표시하는 과정</desc>
+  <defs>
+    <linearGradient id="panel" x1="0" x2="1">
+      <stop stop-color="#161b25"/><stop offset="1" stop-color="#101318"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12z" fill="#4d82d7"/></marker>
+    <style>
+      .box { fill: url(#panel); stroke: #2d394b; stroke-width: 2; rx: 18; }
+      .label { fill: #f4f7fb; font-family: -apple-system, BlinkMacSystemFont, 'Pretendard', 'Segoe UI', sans-serif; font-weight: 700; font-size: 22px; }
+      .sub { fill: #aeb9c9; font-family: -apple-system, BlinkMacSystemFont, 'Pretendard', 'Segoe UI', sans-serif; font-size: 15px; }
+      .tag { fill: #67a1ff; font-family: -apple-system, BlinkMacSystemFont, 'Pretendard', 'Segoe UI', sans-serif; font-size: 13px; font-weight: 700; }
+    </style>
+  </defs>
+  <rect width="1200" height="420" rx="24" fill="#0b0f15"/>
+  <text x="58" y="58" class="label" font-size="30">시세는 한 번 받아서, 필요한 키에만 안전하게 그립니다</text>
+  <text x="58" y="87" class="sub">비공식 플러그인 · 토스증권 공식 Open API만 사용 · 주문/계좌 기능 없음</text>
+  <g transform="translate(58 144)">
+    <rect class="box" width="205" height="170"/>
+    <circle cx="34" cy="35" r="12" fill="#3182f6"/>
+    <text x="58" y="42" class="label">종목 확인</text>
+    <text x="24" y="80" class="sub">국내 코드 / 미국 티커</text>
+    <text x="24" y="108" class="sub">종목명·시장·통화 확인</text>
+    <text x="24" y="143" class="tag">입력값 검증 후 저장</text>
+    <path d="M220 85 H282" stroke="#4d82d7" stroke-width="4" marker-end="url(#arrow)"/>
+  </g>
+  <g transform="translate(342 144)">
+    <rect class="box" width="230" height="170"/>
+    <circle cx="34" cy="35" r="12" fill="#00c073"/>
+    <text x="58" y="42" class="label">공식 Open API</text>
+    <text x="24" y="80" class="sub">REST: 종목·현재가·일봉</text>
+    <text x="24" y="108" class="sub">WebSocket: 체결 스트림</text>
+    <text x="24" y="143" class="tag">같은 종목은 1개 구독 공유</text>
+    <path d="M245 85 H307" stroke="#4d82d7" stroke-width="4" marker-end="url(#arrow)"/>
+  </g>
+  <g transform="translate(650 144)">
+    <rect class="box" width="230" height="170"/>
+    <circle cx="34" cy="35" r="12" fill="#ffb020"/>
+    <text x="58" y="42" class="label">상태·시그널</text>
+    <text x="24" y="80" class="sub">등락률, 상·하한가</text>
+    <text x="24" y="108" class="sub">20·60·120일선</text>
+    <text x="24" y="143" class="tag">같은 신호는 당일 1회</text>
+    <path d="M245 85 H307" stroke="#4d82d7" stroke-width="4" marker-end="url(#arrow)"/>
+  </g>
+  <g transform="translate(958 144)">
+    <rect class="box" width="184" height="170"/>
+    <circle cx="34" cy="35" r="12" fill="#f04452"/>
+    <text x="58" y="42" class="label">키 카드</text>
+    <text x="24" y="80" class="sub">현재가·등락·차트</text>
+    <text x="24" y="108" class="sub">상태·시그널 화면</text>
+    <text x="24" y="143" class="tag">전역 최대 10회/초</text>
+  </g>
+</svg>

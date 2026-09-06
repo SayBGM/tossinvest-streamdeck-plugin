@@ -5,6 +5,7 @@ import type {
   Market,
   QuoteActionSettingsV1,
   QuoteView,
+  Signal,
   StockInfo,
   TradeTick,
 } from "./types.js";
@@ -17,9 +18,20 @@ import { renderQuoteCard, svgToDataUri } from "./renderer/card.js";
 import { RenderScheduler } from "./renderer/scheduler.js";
 import { AuthSession } from "./toss/auth-session.js";
 import { TossError, safeMessageForError } from "./toss/errors.js";
-import { TossRestClient, selectReferencePrice } from "./toss/rest-client.js";
+import {
+  TossRestClient,
+  marketDate,
+  selectReferencePrice,
+} from "./toss/rest-client.js";
 import { TossWebSocket } from "./toss/websocket.js";
 import { safeErrorMessage, safeSerialize } from "./core/safe-log.js";
+import {
+  createSignalMemory,
+  detectSignal,
+  type SignalInput,
+  type SignalMemory,
+} from "./signals/detector.js";
+import { movingAverage, signalSessionKey } from "./signals/indicators.js";
 
 export interface ActionPort {
   readonly id: string;
@@ -46,6 +58,11 @@ interface QuoteState {
   status: QuoteView["status"];
   message?: string;
   refreshing?: boolean;
+  market?: Market;
+  priceLimit?: { upper?: number; lower?: number; date: string };
+  movingAverages?: SignalInput["movingAverages"];
+  readonly signalMemory: SignalMemory;
+  activeSignal?: { signal: Signal; timer: ReturnType<typeof setTimeout> };
 }
 
 export interface PiSender {
@@ -53,6 +70,13 @@ export interface PiSender {
 }
 
 const ACTION_UUID = "com.saybgm.tossinvest.quote";
+const REFRESH_DEBOUNCE_MS = 200;
+
+function numberOrUndefined(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
 
 export class QuoteRuntime {
   readonly auth: AuthSession;
@@ -66,6 +90,9 @@ export class QuoteRuntime {
   private readonly openUrlImpl?: (url: string) => Promise<void>;
   private refreshTimer?: ReturnType<typeof setTimeout>;
   private destroyed = false;
+  private refreshWaiters: Array<() => void> = [];
+  private refreshDebounce?: ReturnType<typeof setTimeout>;
+  private refreshInFlight?: Promise<void>;
 
   constructor(
     options: {
@@ -195,6 +222,11 @@ export class QuoteRuntime {
   async keyDown(action: ActionPort): Promise<void> {
     const binding = this.bindings.get(action.id);
     if (!binding) return;
+    const activeQuote = this.quotes.get(binding.settings.symbol);
+    if (activeQuote?.activeSignal) {
+      this.clearSignal(activeQuote);
+      return;
+    }
     if (
       binding.settings.keyBehavior === "open" &&
       binding.settings.symbol &&
@@ -307,6 +339,21 @@ export class QuoteRuntime {
     if (this.destroyed) return;
     this.destroyed = true;
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    if (this.refreshDebounce) {
+      clearTimeout(this.refreshDebounce);
+      this.refreshDebounce = undefined;
+    }
+    if (this.refreshWaiters.length > 0) {
+      const waiters = this.refreshWaiters;
+      this.refreshWaiters = [];
+      for (const w of waiters) w();
+    }
+    for (const quote of this.quotes.values()) {
+      if (quote.activeSignal) {
+        clearTimeout(quote.activeSignal.timer);
+        quote.activeSignal = undefined;
+      }
+    }
     this.socket.stop();
     this.scheduler.destroy();
     this.bindings.clear();
@@ -318,6 +365,7 @@ export class QuoteRuntime {
       clientId: this.globalSettings.clientId,
       clientSecret: this.globalSettings.clientSecret ? "••••••••" : "",
       renderMode: this.globalSettings.renderMode,
+      signalDurationSec: this.globalSettings.signalDurationSec,
     };
   }
 
@@ -325,12 +373,46 @@ export class QuoteRuntime {
     if (!symbol) return undefined;
     const existing = this.quotes.get(symbol);
     if (existing) return existing;
-    const quote: QuoteState = { symbol, status: "connecting" };
+    const quote: QuoteState = {
+      symbol,
+      status: "connecting",
+      signalMemory: createSignalMemory(),
+    };
     this.quotes.set(symbol, quote);
     return quote;
   }
 
-  private async refreshAll(): Promise<void> {
+  private refreshAll(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this.refreshWaiters.push(resolve);
+      this.scheduleRefreshBatch();
+    });
+  }
+
+  private scheduleRefreshBatch(): void {
+    if (this.refreshDebounce || this.refreshInFlight) return;
+    this.refreshDebounce = setTimeout(() => {
+      this.refreshDebounce = undefined;
+      if (this.destroyed) {
+        const waiters = this.refreshWaiters;
+        this.refreshWaiters = [];
+        for (const w of waiters) w();
+        return;
+      }
+      const waiters = this.refreshWaiters;
+      this.refreshWaiters = [];
+      const run = this.performRefresh()
+        .catch(() => undefined)
+        .finally(() => {
+          this.refreshInFlight = undefined;
+          for (const w of waiters) w();
+          if (this.refreshWaiters.length > 0) this.scheduleRefreshBatch();
+        });
+      this.refreshInFlight = run;
+    }, REFRESH_DEBOUNCE_MS);
+  }
+
+  private async performRefresh(): Promise<void> {
     if (this.destroyed) return;
     const symbols = [
       ...new Set(
@@ -382,11 +464,12 @@ export class QuoteRuntime {
         quote.lastPrice = price.lastPrice;
         quote.timestamp = price.timestamp;
         quote.status = "ready";
+        const market: Market =
+          info.market === "US" || info.currency === "USD" ? "US" : "KR";
+        quote.market = market;
         try {
-          const candles = await this.rest.getCandles(symbol, 10);
+          const candles = await this.rest.getCandles(symbol, 130);
           quote.candles = candles;
-          const market: Market =
-            info.market === "US" || info.currency === "USD" ? "US" : "KR";
           quote.referencePrice = selectReferencePrice(
             candles,
             price.timestamp,
@@ -396,7 +479,11 @@ export class QuoteRuntime {
           const chronological = [...candles].sort((a, b) =>
             a.timestamp.localeCompare(b.timestamp),
           );
-          const sparkline = chronological
+          // Sparkline mirrors prior behaviour: only the most recent 10
+          // chronological candles are used, even though we now fetch a much
+          // deeper history (130) to support the 120-day moving average.
+          const recent = chronological.slice(-10);
+          const sparkline = recent
             .map((c) => Number(c.closePrice))
             .filter((val) => Number.isFinite(val));
           if (price.lastPrice && Number.isFinite(Number(price.lastPrice))) {
@@ -413,10 +500,44 @@ export class QuoteRuntime {
             quote.highPrice = latestCandle.highPrice;
             quote.lowPrice = latestCandle.lowPrice;
           }
+
+          quote.movingAverages = ([20, 60, 120] as const)
+            .map((period) => ({
+              period,
+              value: movingAverage(candles, period, price.timestamp, market),
+            }))
+            .filter(
+              (entry): entry is { period: 20 | 60 | 120; value: number } =>
+                entry.value !== undefined,
+            );
         } catch {
           quote.referencePrice = undefined;
           quote.sparkline = undefined;
+          quote.movingAverages = undefined;
         }
+
+        if (market === "KR") {
+          const today = marketDate(price.timestamp ?? new Date().toISOString(), market);
+          if (quote.priceLimit?.date !== today) {
+            try {
+              const limit = await this.rest.getPriceLimit(symbol);
+              quote.priceLimit = {
+                upper: limit.upperLimitPrice !== undefined
+                  ? Number(limit.upperLimitPrice)
+                  : undefined,
+                lower: limit.lowerLimitPrice !== undefined
+                  ? Number(limit.lowerLimitPrice)
+                  : undefined,
+                date: today,
+              };
+            } catch {
+              // Price limit is best-effort; leave it undefined and keep the
+              // rest of the refresh (price/candles) intact on failure.
+            }
+          }
+        }
+
+        this.evaluateSignals(quote);
       }
       this.reconcileSubscriptions();
       await this.renderAll();
@@ -484,20 +605,93 @@ export class QuoteRuntime {
     quote.timestamp = tick.timestamp;
     quote.status = "ready";
     quote.message = undefined;
+    const priceNum = Number(tick.price);
+    if (Number.isFinite(priceNum)) {
+      if (
+        quote.highPrice !== undefined &&
+        priceNum > Number(quote.highPrice)
+      ) {
+        quote.highPrice = tick.price;
+      }
+      if (quote.lowPrice !== undefined && priceNum < Number(quote.lowPrice)) {
+        quote.lowPrice = tick.price;
+      }
+    }
     if (quote.sparkline && quote.sparkline.length > 0) {
-      const priceNum = Number(tick.price);
       if (Number.isFinite(priceNum)) {
         const updated = [...quote.sparkline];
         updated[updated.length - 1] = priceNum;
         quote.sparkline = updated;
       }
     }
-    void this.renderAll();
+    this.evaluateSignals(quote);
+    void this.renderSymbol(tick.symbol.toUpperCase());
+  }
+
+  /**
+   * Runs the pure signal detector against this quote's latest state and, if
+   * it reports a new signal, switches the symbol's keys to the signal card
+   * for `signalDurationSec` seconds. A no-op when the quote isn't ready or
+   * lacks the numbers a detector needs (this also covers "arming": the
+   * detector itself withholds the very first evaluation per session).
+   */
+  private evaluateSignals(quote: QuoteState): void {
+    if (quote.status !== "ready") return;
+    const lastPrice = numberOrUndefined(quote.lastPrice);
+    const referencePrice = numberOrUndefined(quote.referencePrice);
+    if (lastPrice === undefined || referencePrice === undefined) return;
+    const market = quote.market ?? "KR";
+    const timestamp = quote.timestamp || new Date().toISOString();
+    const sessionKey = signalSessionKey(
+      quote.referencePrice as string,
+      timestamp,
+      market,
+    );
+    const input: SignalInput = {
+      lastPrice,
+      referencePrice,
+      market,
+      sessionKey,
+      timestamp,
+      priceText: quote.lastPrice as string,
+      upperLimit: quote.priceLimit?.upper,
+      lowerLimit: quote.priceLimit?.lower,
+      movingAverages: quote.movingAverages ?? [],
+    };
+    const signal = detectSignal(quote.signalMemory, input);
+    if (signal) this.showSignal(quote, signal);
+  }
+
+  private showSignal(quote: QuoteState, signal: Signal): void {
+    if (quote.activeSignal) clearTimeout(quote.activeSignal.timer);
+    const durationMs = Math.max(1, this.globalSettings.signalDurationSec) * 1000;
+    const timer = setTimeout(() => {
+      this.clearSignal(quote);
+    }, durationMs);
+    quote.activeSignal = { signal, timer };
+    void this.renderSymbol(quote.symbol, true);
+  }
+
+  private clearSignal(quote: QuoteState): void {
+    if (!quote.activeSignal) return;
+    clearTimeout(quote.activeSignal.timer);
+    quote.activeSignal = undefined;
+    void this.renderSymbol(quote.symbol, true);
   }
 
   private async renderAll(): Promise<void> {
     for (const binding of this.bindings.values())
       await this.renderAction(binding.action.id);
+  }
+
+  private async renderSymbol(
+    symbol: string,
+    immediate = false,
+  ): Promise<void> {
+    for (const binding of this.bindings.values()) {
+      if (binding.settings.symbol === symbol)
+        await this.renderAction(binding.action.id, immediate);
+    }
   }
 
   private async renderAction(
@@ -551,12 +745,14 @@ export class QuoteRuntime {
       showCurrencySymbol: settings.showCurrencySymbol,
       sparkline: quote?.sparkline,
       refreshing: quote?.refreshing,
+      live: this.socket.currentState === "connected",
+      signal: quote?.activeSignal?.signal,
     };
   }
 
   private schedulePeriodicRefresh(): void {
     if (this.destroyed) return;
-    const delay = this.socket.currentState === "connected" ? 60_000 : 5_000;
+    const delay = this.socket.currentState === "connected" ? 60_000 : 10_000;
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = undefined;
       void this.refreshAll().finally(() => this.schedulePeriodicRefresh());

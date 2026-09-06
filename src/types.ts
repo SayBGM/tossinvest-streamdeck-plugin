@@ -11,7 +11,32 @@ export type GlobalSettingsV1 = JsonObject & {
   clientId: string;
   clientSecret: string;
   renderMode: RenderMode;
+  signalDurationSec: number;
 };
+
+export type SignalKind =
+  | "rate-up"
+  | "rate-down"
+  | "upper-limit"
+  | "lower-limit"
+  | "ma-break-up"
+  | "ma-break-down";
+export type SignalSentiment = "bullish" | "bearish";
+
+export interface Signal {
+  readonly kind: SignalKind;
+  readonly label: string;
+  readonly sentiment: SignalSentiment;
+  readonly price: string;
+  readonly at: string;
+}
+
+export interface PriceLimit {
+  readonly timestamp: string | null;
+  readonly upperLimitPrice?: string;
+  readonly lowerLimitPrice?: string;
+  readonly currency: string;
+}
 
 export type QuoteActionSettingsV1 = JsonObject & {
   schemaVersion: 1;
@@ -78,6 +103,9 @@ export interface QuoteView {
   readonly showCurrencySymbol?: boolean;
   readonly sparkline?: readonly number[];
   readonly refreshing?: boolean;
+  /** True while the trade WebSocket is connected; false means REST fallback only. */
+  readonly live?: boolean;
+  readonly signal?: Signal;
 }
 
 export interface TradeTick {

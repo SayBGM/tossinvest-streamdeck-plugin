@@ -1,4 +1,10 @@
-import type { Candle, Market, PriceQuote, StockInfo } from "../types.js";
+import type {
+  Candle,
+  Market,
+  PriceLimit,
+  PriceQuote,
+  StockInfo,
+} from "../types.js";
 import { AuthSession } from "./auth-session.js";
 import { TossError } from "./errors.js";
 import { RateGate } from "./rate-gate.js";
@@ -57,6 +63,20 @@ export class TossRestClient {
         `/api/v1/candles?symbol=${encodeURIComponent(symbol)}&interval=1d&count=${count}&adjusted=true`,
       );
       return Array.isArray(result.candles) ? result.candles : [];
+    });
+  }
+
+  async getPriceLimit(symbol: string): Promise<PriceLimit> {
+    return this.marketData.run(async () => {
+      const result = await this.request<PriceLimit>(
+        `/api/v1/price-limits?symbol=${encodeURIComponent(symbol)}`,
+      );
+      return {
+        timestamp: result.timestamp ?? null,
+        upperLimitPrice: result.upperLimitPrice ?? undefined,
+        lowerLimitPrice: result.lowerLimitPrice ?? undefined,
+        currency: result.currency,
+      };
     });
   }
 
@@ -146,6 +166,17 @@ export class TossRestClient {
   }
 }
 
+export function marketDate(ts: string, market?: Market): string {
+  const tz = market === "US" ? "America/New_York" : "Asia/Seoul";
+  try {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(
+      new Date(ts),
+    );
+  } catch {
+    return ts.slice(0, 10);
+  }
+}
+
 export function selectReferencePrice(
   candles: readonly Candle[],
   quoteTimestamp: string | null = null,
@@ -157,22 +188,11 @@ export function selectReferencePrice(
   );
   if (sorted.length === 1) return sorted[0]?.closePrice;
 
-  const tz = market === "US" ? "America/New_York" : "Asia/Seoul";
-  const formatMarketDate = (ts: string): string => {
-    try {
-      return new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(
-        new Date(ts),
-      );
-    } catch {
-      return ts.slice(0, 10);
-    }
-  };
-
   if (quoteTimestamp) {
-    const quoteDate = formatMarketDate(quoteTimestamp);
+    const quoteDate = marketDate(quoteTimestamp, market);
     // Find the newest candle strictly before the current quote trading date
     const prior = sorted.find(
-      (candle) => formatMarketDate(candle.timestamp) < quoteDate,
+      (candle) => marketDate(candle.timestamp, market) < quoteDate,
     );
     if (prior) return prior.closePrice;
   }

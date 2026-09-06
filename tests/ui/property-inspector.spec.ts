@@ -139,12 +139,14 @@ async function initialize(
           clientId: "client-12345678",
           clientSecret: "••••••••",
           renderMode: "realtime",
+          signalDurationSec: 5,
         }
       : {
           schemaVersion: 1,
           clientId: "",
           clientSecret: "",
           renderMode: "realtime",
+          signalDurationSec: 5,
         },
   });
 }
@@ -268,6 +270,22 @@ test("잘못된 종목은 기존 확정 설정을 보존하고 성공한 최신 
   await expect(page).toHaveScreenshot("property-inspector-configured.png", {
     fullPage: true,
   });
+});
+
+test("시그널 표시 시간을 바꾸면 저장 커맨드에 반영된다", async ({ page }) => {
+  await openInspector(page);
+  await initialize(page, true);
+
+  // Saved credentials collapse the global card, so expand it before editing.
+  await page.locator("#toggleGlobalBtn").click();
+  await expect(page.locator("#signalDuration")).toBeVisible();
+  await expect(page.locator("#signalDuration")).toHaveValue("5");
+
+  await page.locator("#signalDuration").selectOption("10");
+  await page.getByRole("button", { name: "저장 및 연결 확인" }).click();
+
+  const save = await latestCommand(page, "global/save");
+  expect(save).toMatchObject({ signalDurationSec: 10 });
 });
 
 test("화면 모드 탭은 선택 상태와 자동 저장을 동기화한다", async ({ page }) => {

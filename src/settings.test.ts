@@ -26,6 +26,7 @@ describe("settings", () => {
       clientId: "c_1",
       clientSecret: "s_1",
       renderMode: "realtime",
+      signalDurationSec: 5,
     });
     expect(
       migrateActionSettings({ symbol: "aapl", keyBehavior: "open" }),
@@ -84,6 +85,7 @@ describe("settings", () => {
         clientId: "id",
         clientSecret: "sec",
         renderMode: "realtime",
+        signalDurationSec: 5,
       }),
     ).toBe(true);
     expect(
@@ -92,7 +94,34 @@ describe("settings", () => {
         clientId: "",
         clientSecret: "sec",
         renderMode: "realtime",
+        signalDurationSec: 5,
       }),
     ).toBe(false);
+  });
+
+  it("parses signalDurationSec from numbers and numeric strings, clamped to [1, 60]", () => {
+    expect(migrateGlobalSettings({}).signalDurationSec).toBe(5);
+    expect(
+      migrateGlobalSettings({ signalDurationSec: 10 }).signalDurationSec,
+    ).toBe(10);
+    expect(
+      migrateGlobalSettings({ signalDurationSec: "3" }).signalDurationSec,
+    ).toBe(3);
+    expect(
+      migrateGlobalSettings({ signalDurationSec: 0 }).signalDurationSec,
+    ).toBe(1);
+    expect(
+      migrateGlobalSettings({ signalDurationSec: -5 }).signalDurationSec,
+    ).toBe(1);
+    expect(
+      migrateGlobalSettings({ signalDurationSec: 90 }).signalDurationSec,
+    ).toBe(60);
+    expect(
+      migrateGlobalSettings({ signalDurationSec: "not-a-number" })
+        .signalDurationSec,
+    ).toBe(5);
+    expect(
+      migrateGlobalSettings({ signalDurationSec: NaN }).signalDurationSec,
+    ).toBe(5);
   });
 });

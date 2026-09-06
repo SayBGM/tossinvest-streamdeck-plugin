@@ -66,6 +66,7 @@ interface PiCommand {
   readonly clientId?: unknown;
   readonly clientSecret?: unknown;
   readonly renderMode?: unknown;
+  readonly signalDurationSec?: unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -83,7 +84,10 @@ async function sendPiResponse(
 }
 
 const runtime = createRuntime({
-  piSender: async (_actionId, message) => {
+  piSender: async (actionId, message) => {
+    // Only one Property Inspector is ever open; sending a per-key message for
+    // any other key would just duplicate the payload on the host socket.
+    if (streamDeck.ui.action?.id !== actionId) return;
     await streamDeck.ui.sendToPropertyInspector(message as JsonValue);
   },
   openUrl: async (url) => {
@@ -91,7 +95,7 @@ const runtime = createRuntime({
   },
 });
 
-streamDeck.logger.setLevel("debug");
+streamDeck.logger.setLevel("info");
 
 streamDeck.ui.onDidAppear(async (ev) => {
   streamDeck.logger.debug(
@@ -272,11 +276,12 @@ void streamDeck
     );
   });
 
-process.once("SIGTERM", () => {
-  void runtime.destroy();
-});
-process.once("SIGINT", () => {
-  void runtime.destroy();
-});
+// The Stream Deck connection keeps the event loop alive, so a signal must end
+// the process explicitly once the runtime has released its sockets and timers.
+function shutdown(): void {
+  void runtime.destroy().finally(() => process.exit(0));
+}
+process.once("SIGTERM", shutdown);
+process.once("SIGINT", shutdown);
 
 export { runtime, QuoteAction, migrateActionSettings };

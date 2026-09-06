@@ -10,6 +10,7 @@
 - `src/toss/rest-client.ts`: 공식 REST 엔드포인트(`/oauth2/token`, `/api/v1/stocks`, `/prices`, `/candles`)와 그룹별 호출 간격을 관리한다.
 - `src/toss/websocket.ts`: `wss://openapi-ws.tossinvest.com/ws/v1` 하나를 공유하고 full-replace 구독, 60초 PING, 재연결을 담당한다.
 - `src/runtime.ts`: Stream Deck 액션과 API 상태를 연결한다. 여러 키의 같은 종목은 하나의 구독으로 합친다.
+- `src/signals/`: 등락률·상하한가·이평선 시그널을 판단하는 순수 함수 탐지기. 세션(기준가·거래일)당 같은 (레벨/방향) 시그널은 1회만 발화한다.
 - `src/renderer/`: SVG 카드와 전역 30회/초 렌더 커밋 큐. 모든 틱을 그대로 `setImage`로 보내지 않는다.
 - `com.saybgm.tossinvest.sdPlugin/ui/`: 외부 네트워크 없이 동작하는 Property Inspector.
 

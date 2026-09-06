@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { selectReferencePrice, TossRestClient } from "./rest-client.js";
+import {
+  marketDate,
+  selectReferencePrice,
+  TossRestClient,
+} from "./rest-client.js";
 import { AuthSession } from "./auth-session.js";
 
 function response(body: unknown, status = 200): Response {
@@ -34,6 +38,7 @@ describe("Toss REST client", () => {
         clientId: "client",
         clientSecret: "secret",
         renderMode: "realtime",
+        signalDurationSec: 5,
       },
       { fetch },
     );
@@ -118,5 +123,85 @@ describe("Toss REST client", () => {
         "US",
       ),
     ).toBe("180.00");
+  });
+
+  it("formats market dates for KR (Asia/Seoul) and US (America/New_York), falling back on invalid input", () => {
+    expect(marketDate("2026-09-02T16:00:00Z", "KR")).toBe("2026-09-03");
+    expect(marketDate("2026-09-02T16:00:00Z", "US")).toBe("2026-09-02");
+    expect(marketDate("2026-09-02T16:00:00Z")).toBe("2026-09-03");
+    expect(marketDate("not-a-real-date")).toBe("not-a-real");
+  });
+
+  it("fetches and normalizes price limits, mapping null to undefined", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        response({ access_token: "token", expires_in: 86400 }),
+      )
+      .mockResolvedValueOnce(
+        response({
+          result: {
+            timestamp: "2026-09-07T09:00:00+09:00",
+            upperLimitPrice: "93600",
+            lowerLimitPrice: "50400",
+            currency: "KRW",
+          },
+        }),
+      );
+    const auth = new AuthSession(
+      {
+        schemaVersion: 1,
+        clientId: "client",
+        clientSecret: "secret",
+        renderMode: "realtime",
+        signalDurationSec: 5,
+      },
+      { fetch },
+    );
+    const client = new TossRestClient(auth, { fetch });
+    const limit = await client.getPriceLimit("005930");
+    expect(limit).toEqual({
+      timestamp: "2026-09-07T09:00:00+09:00",
+      upperLimitPrice: "93600",
+      lowerLimitPrice: "50400",
+      currency: "KRW",
+    });
+    expect(String(fetch.mock.calls[1]?.[0])).toContain(
+      "/api/v1/price-limits?symbol=005930",
+    );
+
+    const fetchUs = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        response({ access_token: "token", expires_in: 86400 }),
+      )
+      .mockResolvedValueOnce(
+        response({
+          result: {
+            timestamp: null,
+            upperLimitPrice: null,
+            lowerLimitPrice: null,
+            currency: "USD",
+          },
+        }),
+      );
+    const authUs = new AuthSession(
+      {
+        schemaVersion: 1,
+        clientId: "client",
+        clientSecret: "secret",
+        renderMode: "realtime",
+        signalDurationSec: 5,
+      },
+      { fetch: fetchUs },
+    );
+    const clientUs = new TossRestClient(authUs, { fetch: fetchUs });
+    const usLimit = await clientUs.getPriceLimit("AAPL");
+    expect(usLimit).toEqual({
+      timestamp: null,
+      upperLimitPrice: undefined,
+      lowerLimitPrice: undefined,
+      currency: "USD",
+    });
   });
 });

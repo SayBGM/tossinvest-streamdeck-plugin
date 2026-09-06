@@ -11,6 +11,7 @@ const existing: GlobalSettingsV1 = {
   clientId: "old-client",
   clientSecret: "old-secret",
   renderMode: "realtime",
+  signalDurationSec: 5,
 };
 
 function fakeRuntime(): GlobalSettingsRuntime {
@@ -42,7 +43,27 @@ describe("PI global credential commit", () => {
       clientId: "new-client",
       clientSecret: "old-secret",
       renderMode: "economy",
+      signalDurationSec: 5,
     });
+  });
+
+  it("keeps the existing signalDurationSec when the input omits it, and saves a provided one", () => {
+    expect(
+      candidateGlobalSettings(existing, {
+        clientId: "new-client",
+        clientSecret: "",
+        renderMode: "economy",
+      }).signalDurationSec,
+    ).toBe(5);
+
+    expect(
+      candidateGlobalSettings(existing, {
+        clientId: "new-client",
+        clientSecret: "",
+        renderMode: "economy",
+        signalDurationSec: 10,
+      }).signalDurationSec,
+    ).toBe(10);
   });
 
   it("does not update runtime or persist when validation fails", async () => {

@@ -22,6 +22,17 @@ export function normalizeSymbol(value: unknown): string {
   return /^[A-Z0-9.-]{1,20}$/.test(symbol) ? symbol : "";
 }
 
+function clampSignalDurationSec(value: unknown): number {
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim() !== ""
+        ? Number(value)
+        : NaN;
+  if (!Number.isFinite(parsed)) return 5;
+  return Math.min(60, Math.max(1, parsed));
+}
+
 export function migrateGlobalSettings(input: unknown): GlobalSettingsV1 {
   const source = record(input);
   const renderMode: RenderMode =
@@ -31,6 +42,7 @@ export function migrateGlobalSettings(input: unknown): GlobalSettingsV1 {
     clientId: stringValue(source.clientId).trim(),
     clientSecret: stringValue(source.clientSecret).trim(),
     renderMode,
+    signalDurationSec: clampSignalDurationSec(source.signalDurationSec),
   };
 }
 

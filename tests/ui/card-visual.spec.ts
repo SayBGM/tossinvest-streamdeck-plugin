@@ -34,14 +34,14 @@ const fixtures: ReadonlyArray<{ readonly label: string; readonly view: QuoteView
   {
     label: "긴 가격 · 시세",
     view: {
-      symbol: "LONG",
-      name: "아주긴종목이름테스트",
+      symbol: "207940",
+      name: "삼성바이오로직스",
       currency: "KRW",
       status: "ready",
-      lastPrice: "1234567890123",
-      referencePrice: "1234567000000",
-      highPrice: "1234567999999",
-      lowPrice: "1234000000000",
+      lastPrice: "1034000",
+      referencePrice: "1002000",
+      highPrice: "1041000",
+      lowPrice: "998000",
       viewMode: "detail",
     },
   },
@@ -76,6 +76,75 @@ const fixtures: ReadonlyArray<{ readonly label: string; readonly view: QuoteView
       status: "invalid-symbol",
     },
   },
+  {
+    label: "긴 미국 종목명 · 차트",
+    view: {
+      symbol: "DELL",
+      name: "델 테크놀로지스",
+      currency: "USD",
+      status: "ready",
+      lastPrice: "522.6",
+      referencePrice: "516.39",
+      sparkline: [510, 514, 512, 518, 520, 522.6],
+      viewMode: "chart",
+      colorTheme: "global",
+      market: "US",
+    },
+  },
+  {
+    label: "미국 하락 · 시세 · 오프라인",
+    view: {
+      symbol: "TSLA",
+      name: "테슬라",
+      currency: "USD",
+      status: "ready",
+      lastPrice: "352.9",
+      referencePrice: "376.37",
+      highPrice: "364.69",
+      lowPrice: "351.32",
+      viewMode: "detail",
+      live: false,
+    },
+  },
+  {
+    label: "호재 · 상한가",
+    view: {
+      symbol: "005930",
+      name: "삼성전자",
+      market: "KR",
+      currency: "KRW",
+      status: "ready",
+      lastPrice: "93600",
+      referencePrice: "72000",
+      signal: {
+        kind: "upper-limit",
+        label: "상한가",
+        sentiment: "bullish",
+        price: "93600",
+        at: "2026-09-07T01:05:00Z",
+      },
+    },
+  },
+  {
+    label: "악재 · 이평선 이탈",
+    view: {
+      symbol: "NVDA",
+      name: "NVIDIA Corporation",
+      market: "US",
+      currency: "USD",
+      status: "ready",
+      colorTheme: "global",
+      lastPrice: "168.4",
+      referencePrice: "182.7",
+      signal: {
+        kind: "ma-break-down",
+        label: "60일선 이탈",
+        sentiment: "bearish",
+        price: "168.4",
+        at: "2026-09-07T01:05:00Z",
+      },
+    },
+  },
 ];
 
 test("144px 원본과 96px·72px 축소 카드가 안정적으로 보인다", async ({ page }) => {
@@ -100,7 +169,7 @@ test("144px 원본과 96px·72px 축소 카드가 안정적으로 보인다", as
     )
     .join("");
 
-  await page.setViewportSize({ width: 1040, height: 900 });
+  await page.setViewportSize({ width: 1240, height: 900 });
   await page.setContent(`<!doctype html>
     <html lang="ko">
       <style>
@@ -108,8 +177,8 @@ test("144px 원본과 96px·72px 축소 카드가 안정적으로 보인다", as
         body { margin: 0; padding: 24px; color: #f2f4f6; background: #0d0e11; font: 14px Arial, sans-serif; }
         section { margin-bottom: 24px; }
         h2 { margin: 0 0 10px; font-size: 18px; }
-        .cards { display: flex; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
-        figure { width: 150px; margin: 0; display: grid; justify-items: center; gap: 7px; }
+        .cards { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+        figure { width: 130px; margin: 0; display: grid; justify-items: center; gap: 7px; }
         img { display: block; border-radius: 12px; image-rendering: auto; }
         figcaption { color: #b0b8c1; font-size: 12px; text-align: center; }
       </style>
