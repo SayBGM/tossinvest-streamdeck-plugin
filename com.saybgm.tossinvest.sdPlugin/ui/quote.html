@@ -60,14 +60,13 @@
           <label
             >화면 갱신 주기
             <select id="renderMode">
-              <option value="realtime">실시간 체결 (약 100ms)</option>
+              <option value="realtime">실시간 (전체 키 합산 최대 10회/초)</option>
               <option value="economy">절약형 (1초)</option>
             </select>
           </label>
 
           <div class="buttons">
-            <button id="saveGlobal">전역 설정 저장</button>
-            <button id="testGlobal" class="secondary">연결 테스트</button>
+            <button id="saveGlobal">저장 및 연결 확인</button>
           </div>
           <output id="globalStatus" aria-live="polite"></output>
         </div>
@@ -80,7 +79,7 @@
         <div class="guide-desc">
           위의 <strong>Client ID</strong>와 <strong>Client Secret</strong>을
           입력하고<br />
-          <strong>[전역 설정 저장]</strong>을 완료하면 종목을 선택할 수 있는
+          <strong>[저장 및 연결 확인]</strong>을 완료하면 종목을 선택할 수 있는
           2단계가 열립니다.
         </div>
       </div>
@@ -188,28 +187,60 @@
             <option value="detail">시세 모드</option>
           </select>
 
-          <div class="view-mode-tabs" role="tablist">
+          <div class="view-mode-tabs" role="tablist" aria-label="화면 모드">
             <button
               type="button"
               class="view-mode-tab active"
               data-mode="chart"
+              role="tab"
+              aria-selected="true"
+              tabindex="0"
             >
               <span class="tab-icon">📈</span>
               <span class="tab-text">차트 모드</span>
             </button>
-            <button type="button" class="view-mode-tab" data-mode="detail">
+            <button
+              type="button"
+              class="view-mode-tab"
+              data-mode="detail"
+              role="tab"
+              aria-selected="false"
+              tabindex="-1"
+            >
               <span class="tab-icon">📋</span>
               <span class="tab-text">시세 모드</span>
             </button>
           </div>
 
           <div class="preview-wrapper">
-            <div class="preview-box">
-              <img id="keyPreview" alt="키 미리보기" width="96" height="96" />
+            <div class="preview-box" data-preview-size="72">
+              <div id="previewPlaceholder" class="preview-placeholder">
+                종목 확인 후 표시
+              </div>
+              <img id="keyPreview" alt="키 미리보기" width="72" height="72" hidden />
+            </div>
+            <div class="preview-controls" role="group" aria-label="미리보기 크기">
+              <button
+                type="button"
+                class="preview-size-btn active"
+                data-preview-size="72"
+                aria-pressed="true"
+              >
+                72px
+              </button>
+              <button
+                type="button"
+                class="preview-size-btn"
+                data-preview-size="144"
+                aria-pressed="false"
+              >
+                144px
+              </button>
             </div>
             <div id="viewModeDesc" class="preview-mode-desc">
               현재가, 등락폭, 미니 차트가 함께 표시됩니다.
             </div>
+            <p class="preview-note">미리보기는 예시 데이터로 표시될 수 있습니다.</p>
           </div>
         </div>
 

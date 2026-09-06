@@ -118,7 +118,10 @@ export class QuoteRuntime {
     return ACTION_UUID;
   }
 
-  async updateGlobalSettings(raw: unknown): Promise<void> {
+  async updateGlobalSettings(
+    raw: unknown,
+    options: { readonly deferRefresh?: boolean } = {},
+  ): Promise<void> {
     const next = migrateGlobalSettings(raw);
     const previousMode = this.globalSettings.renderMode;
     const changed = this.auth.updateSettings(next);
@@ -140,7 +143,15 @@ export class QuoteRuntime {
         quote.status = "connecting";
         quote.message = undefined;
       }
-      await this.refreshAll();
+      if (options.deferRefresh) {
+        void this.refreshAll().catch(() => {
+          // refreshAll normally converts failures to safe quote states. Keep a
+          // defensive boundary because credential-save acknowledgement must
+          // not become an unhandled rejection.
+        });
+      } else {
+        await this.refreshAll();
+      }
     }
     await this.sendPush({
       type: "global-settings",
@@ -193,7 +204,12 @@ export class QuoteRuntime {
         binding.settings.market === "KR"
           ? `https://www.tossinvest.com/stocks/A${binding.settings.symbol}/order`
           : `https://www.tossinvest.com/stocks/${binding.settings.symbol}/order`;
-      await this.openUrl(url);
+      try {
+        await this.openUrl(url);
+      } catch (error) {
+        await this.showActionAlert(action);
+        throw error;
+      }
     } else if (binding.settings.keyBehavior === "toggle-view") {
       const current = binding.settings.viewMode || "chart";
       binding.settings.viewMode = current === "chart" ? "detail" : "chart";
@@ -210,7 +226,8 @@ export class QuoteRuntime {
         await this.renderAction(action.id, true);
       }
       try {
-        await this.refreshSymbol(binding.settings.symbol, true);
+        const refreshed = await this.refreshSymbol(binding.settings.symbol, true);
+        if (!refreshed) await this.showActionAlert(action);
       } finally {
         if (quote) {
           quote.refreshing = false;
@@ -352,8 +369,13 @@ export class QuoteRuntime {
         const info = infosBySymbol.get(symbol.toUpperCase());
         const price = pricesBySymbol.get(symbol.toUpperCase());
         if (!info || !price) {
-          quote.status = "invalid-symbol";
-          quote.message = "종목을 찾을 수 없습니다.";
+          if (quote.lastPrice) {
+            quote.status = "stale";
+            quote.message = "시세가 지연되었습니다.";
+          } else {
+            quote.status = "invalid-symbol";
+            quote.message = "종목을 찾을 수 없습니다.";
+          }
           continue;
         }
         quote.info = info;
@@ -402,12 +424,13 @@ export class QuoteRuntime {
       const message = safeMessageForError(error);
       for (const symbol of symbols) {
         const quote = this.ensureQuote(symbol);
-        if (quote && !quote.lastPrice) {
-          quote.status =
-            error instanceof TossError && error.code === "INVALID_SYMBOL"
+        if (quote) {
+          quote.status = quote.lastPrice
+            ? "stale"
+            : error instanceof TossError && error.code === "INVALID_SYMBOL"
               ? "invalid-symbol"
               : "stale";
-          quote.message = message;
+          quote.message = quote.lastPrice ? "시세가 지연되었습니다." : message;
         }
       }
       await this.renderAll();
@@ -417,15 +440,20 @@ export class QuoteRuntime {
   private async refreshSymbol(
     symbol: string,
     immediate = false,
-  ): Promise<void> {
-    if (!symbol) return this.renderAll();
+  ): Promise<boolean> {
+    if (!symbol) {
+      await this.renderAll();
+      return false;
+    }
     await this.refreshAll();
+    const refreshed = this.quotes.get(symbol)?.status === "ready";
     if (immediate) {
       for (const binding of this.bindings.values()) {
         if (binding.settings.symbol === symbol)
           await this.renderAction(binding.action.id, true);
       }
     }
+    return refreshed;
   }
 
   private reconcileSubscriptions(): void {
@@ -537,6 +565,15 @@ export class QuoteRuntime {
 
   private async openUrl(url: string): Promise<void> {
     if (this.openUrlImpl) await this.openUrlImpl(url);
+  }
+
+  private async showActionAlert(action: ActionPort): Promise<void> {
+    if (!action.showAlert) return;
+    try {
+      await action.showAlert();
+    } catch {
+      // Preserve the original action error if alert delivery itself fails.
+    }
   }
 }
 

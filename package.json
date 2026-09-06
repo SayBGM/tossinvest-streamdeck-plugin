@@ -10,8 +10,11 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "test:ui": "playwright test",
+    "test:ui:update": "playwright test --update-snapshots",
     "lint": "tsc --noEmit",
     "verify": "npm run typecheck && npm run test && npm run build",
+    "verify:all": "npm run verify && npm run test:ui",
     "local:install": "npm run build && node ./scripts/install-local-plugin.mjs",
     "package:plugin": "npm run build && node scripts/package-plugin.mjs",
     "package:smoke": "node scripts/verify-package.mjs && node scripts/runtime-smoke.mjs && node scripts/verify-plugin-runtime.mjs"
@@ -25,6 +28,7 @@
   },
   "devDependencies": {
     "@elgato/cli": "1.9.0",
+    "@playwright/test": "^1.63.0",
     "@rollup/plugin-commonjs": "28.0.9",
     "@rollup/plugin-node-resolve": "16.0.1",
     "@rollup/plugin-typescript": "12.1.4",

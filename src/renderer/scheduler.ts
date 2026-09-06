@@ -105,7 +105,10 @@ export class RenderScheduler {
 
   private drainQueue(): void {
     if (this.queueTimer || this.destroyed || this.queue.size === 0) return;
-    const wait = Math.max(0, this.lastCommitAt + 34 - Date.now());
+    // Stream Deck's programmatic update budget is global to the plugin.
+    // Keep commits at most once every 100ms (10/second); pending frames are
+    // still coalesced per target and drained fairly below.
+    const wait = Math.max(0, this.lastCommitAt + 100 - Date.now());
     this.queueTimer = setTimeout(() => {
       this.queueTimer = undefined;
       const entry = this.nextEntry();

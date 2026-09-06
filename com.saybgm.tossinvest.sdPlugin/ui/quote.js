@@ -5,6 +5,10 @@
     actionSettings: {},
     globalSettings: {},
     request: 0,
+    draftSymbol: "",
+    resolveRequestId: null,
+    globalSaveRequestId: null,
+    previewRequestId: null,
   };
   var pendingRequests = {};
 
@@ -24,6 +28,30 @@
     el.style.color = error ? "#F04452" : "#00C073";
   };
 
+  var setBusy = function (scope, busy) {
+    var ids =
+      scope === "global"
+        ? ["saveGlobal", "testGlobal"]
+        : ["resolve", "symbol"];
+    ids.forEach(function (id) {
+      var el = $(id);
+      if (el) el.disabled = busy;
+    });
+    if (scope === "resolve") {
+      document.querySelectorAll(".chip").forEach(function (chip) {
+        chip.disabled = busy;
+      });
+    }
+  };
+
+  var clearPendingRequest = function (reqId) {
+    var pending = pendingRequests[reqId];
+    if (!pending) return null;
+    clearTimeout(pending.timeout);
+    delete pendingRequests[reqId];
+    return pending;
+  };
+
   var sendCommand = function (type, extra) {
     var reqId = requestId();
     var payload = Object.assign({ type: type, requestId: reqId }, extra || {});
@@ -31,22 +59,34 @@
     // Use sdpi.js transport (includes action: actionInfo.action)
     sendToPlugin(payload);
 
-    pendingRequests[reqId] = setTimeout(function () {
-      delete pendingRequests[reqId];
-      if (type.indexOf("global") === 0) {
-        setStatus(
-          "globalStatus",
-          "요청 시간 초과 (토스증권 WTS IP 허용 및 네트워크를 확인하세요)",
-          true,
-        );
-      } else {
-        setStatus(
-          "actionStatus",
-          "요청 시간 초과 (종목 코드 및 네트워크를 확인하세요)",
-          true,
-        );
-      }
-    }, 12000);
+    pendingRequests[reqId] = {
+      type: type,
+      timeout: setTimeout(function () {
+        var pending = pendingRequests[reqId];
+        if (!pending) return;
+        delete pendingRequests[reqId];
+        if (type === "global/save") {
+          if (state.globalSaveRequestId === reqId) {
+            state.globalSaveRequestId = null;
+            setBusy("global", false);
+          }
+          setStatus(
+            "globalStatus",
+            "인증 확인 시간이 초과되었습니다. WTS IP 허용과 네트워크를 확인하세요.",
+            true,
+          );
+        } else if (type === "symbol/resolve") {
+          if (state.resolveRequestId !== reqId) return;
+          state.resolveRequestId = null;
+          setBusy("resolve", false);
+          setStatus(
+            "actionStatus",
+            "요청 시간 초과 (종목 코드 및 네트워크를 확인하세요)",
+            true,
+          );
+        }
+      }, type === "global/save" ? 20_000 : 12_000),
+    };
 
     return reqId;
   };
@@ -54,7 +94,9 @@
   var actionPayload = function () {
     return {
       schemaVersion: 1,
-      symbol: ($("symbol").value || "").trim().toUpperCase(),
+      // The input can contain an unverified draft. Persist only the resolved
+      // settings that were previously accepted by the official API.
+      symbol: (state.actionSettings && state.actionSettings.symbol) || "",
       name: (state.actionSettings && state.actionSettings.name) || "",
       market:
         (state.actionSettings && state.actionSettings.market) || undefined,
@@ -69,6 +111,7 @@
 
   var saveActionSettings = function () {
     var payload = actionPayload();
+    if (!payload.symbol) return;
     state.actionSettings = payload;
     setSettings(payload);
     requestPreview();
@@ -76,7 +119,9 @@
 
   var requestPreview = function () {
     if (state.actionSettings && state.actionSettings.symbol) {
-      sendCommand("quote/preview", { settings: state.actionSettings });
+      state.previewRequestId = sendCommand("quote/preview", {
+        settings: state.actionSettings,
+      });
     }
   };
 
@@ -157,8 +202,12 @@
     tabs.forEach(function (tab) {
       if (tab.getAttribute("data-mode") === mode) {
         tab.classList.add("active");
+        tab.setAttribute("aria-selected", "true");
+        tab.setAttribute("tabindex", "0");
       } else {
         tab.classList.remove("active");
+        tab.setAttribute("aria-selected", "false");
+        tab.setAttribute("tabindex", "-1");
       }
     });
 
@@ -181,8 +230,11 @@
     settings = settings || state.actionSettings || {};
     state.actionSettings = settings;
 
-    var sym = settings.symbol || ($("symbol") && $("symbol").value) || "";
-    $("symbol").value = sym;
+    var sym = settings.symbol || "";
+    if (!state.resolveRequestId) {
+      state.draftSymbol = sym;
+      $("symbol").value = sym;
+    }
     $("keyBehavior").value = settings.keyBehavior || "refresh";
     setViewMode(settings.viewMode || "chart", false);
     $("colorTheme").value = settings.colorTheme || "kr";
@@ -241,10 +293,12 @@
       setStatus("actionStatus", "종목 코드 또는 티커를 입력하세요.", true);
       return;
     }
+    if (state.resolveRequestId) return;
+    state.draftSymbol = symbol;
     $("symbol").value = symbol;
-    updateChipActive(symbol);
-    saveActionSettings();
-    sendCommand("symbol/resolve", { symbol: symbol });
+    var reqId = sendCommand("symbol/resolve", { symbol: symbol });
+    state.resolveRequestId = reqId;
+    setBusy("resolve", true);
     setStatus("actionStatus", "종목 확인 중…");
   };
 
@@ -300,15 +354,30 @@
 
   document.addEventListener("piDidReceiveMessage", function (e) {
     var payload = e.detail || {};
-
-    if (payload.requestId && pendingRequests[payload.requestId]) {
-      clearTimeout(pendingRequests[payload.requestId]);
-      delete pendingRequests[payload.requestId];
+    if (
+      payload.actionId &&
+      (!actionInfo || payload.actionId !== actionInfo.context)
+    ) {
+      return;
     }
+    var pending = payload.requestId
+      ? clearPendingRequest(payload.requestId)
+      : null;
+    var requestType = pending && pending.type;
 
-    if (payload.image) {
+    if (
+      payload.image &&
+      (payload.type === "preview" ||
+        (requestType === "quote/preview" &&
+          payload.requestId === state.previewRequestId))
+    ) {
       var img = $("keyPreview");
-      if (img) img.src = payload.image;
+      var placeholder = $("previewPlaceholder");
+      if (img) {
+        img.src = payload.image;
+        img.hidden = false;
+      }
+      if (placeholder) placeholder.hidden = true;
     }
 
     if (payload.type === "init") {
@@ -328,6 +397,14 @@
       payload.settings.schemaVersion === 1 &&
       payload.settings.symbol
     ) {
+      // Ignore a superseded resolver response. The key remains bound to its
+      // last confirmed symbol until the newest request succeeds.
+      if (requestType !== "symbol/resolve" ||
+          payload.requestId !== state.resolveRequestId) {
+        return;
+      }
+      state.resolveRequestId = null;
+      setBusy("resolve", false);
       var merged = Object.assign({}, state.actionSettings, payload.settings, {
         keyBehavior: $("keyBehavior").value,
         viewMode: $("viewMode").value,
@@ -336,6 +413,7 @@
         showCurrencySymbol: $("showCurrencySymbol").checked,
       });
       state.actionSettings = merged;
+      state.draftSymbol = merged.symbol;
       setSettings(merged);
       renderAction(merged);
       requestPreview();
@@ -345,6 +423,11 @@
           (payload.settings.name || payload.settings.symbol),
       );
     } else if (payload.ok && payload.settings) {
+      if (requestType !== "global/save") return;
+      if (requestType === "global/save") {
+        state.globalSaveRequestId = null;
+        setBusy("global", false);
+      }
       renderGlobal(payload.settings, payload.isConfigured);
       updateStepVisibility(
         payload.isConfigured !== undefined ? payload.isConfigured : true,
@@ -352,13 +435,25 @@
       setStatus("globalStatus", payload.message || "전역 설정을 저장했습니다.");
       requestPreview();
     } else if (payload.ok) {
-      if (payload.isConfigured) {
+      if (requestType === "global/test") {
+        setStatus("globalStatus", payload.message || "인증에 성공했습니다.");
+      } else if (payload.isConfigured) {
         updateStepVisibility(true);
+        setStatus("globalStatus", payload.message || "성공했습니다.");
       }
-      setStatus("globalStatus", payload.message || "성공했습니다.");
     } else if (payload.message) {
-      setStatus("globalStatus", payload.message, true);
-      setStatus("actionStatus", payload.message, true);
+      if (requestType === "global/save" || requestType === "global/test") {
+        if (requestType === "global/save") {
+          state.globalSaveRequestId = null;
+          setBusy("global", false);
+        }
+        setStatus("globalStatus", payload.message, true);
+      } else if (requestType === "symbol/resolve") {
+        if (payload.requestId !== state.resolveRequestId) return;
+        state.resolveRequestId = null;
+        setBusy("resolve", false);
+        setStatus("actionStatus", payload.message, true);
+      }
     }
   });
 
@@ -378,18 +473,25 @@
       setStatus("globalStatus", "Client Secret을 입력하세요.", true);
       return;
     }
-    sendCommand("global/save", {
+    var reqId = sendCommand("global/save", {
       clientId: clientId,
       clientSecret: clientSecret,
       renderMode: $("renderMode").value,
     });
-    setStatus("globalStatus", "저장 중…");
+    state.globalSaveRequestId = reqId;
+    setBusy("global", true);
+    setStatus("globalStatus", "인증 확인 중…");
   });
 
-  $("testGlobal").addEventListener("click", function () {
-    sendCommand("global/test");
-    setStatus("globalStatus", "연결 테스트 중…");
-  });
+  // Keep the legacy command compatible when an older inspector injects the
+  // control, while current markup exposes only the validate-and-save CTA.
+  if ($("testGlobal")) {
+    $("testGlobal").addEventListener("click", function () {
+      sendCommand("global/test");
+      setStatus("globalStatus", "연결 테스트 중…");
+    });
+    $("testGlobal").hidden = true;
+  }
 
   $("resolve").addEventListener("click", function () {
     resolveSymbol();
@@ -400,6 +502,11 @@
       e.preventDefault();
       resolveSymbol();
     }
+  });
+
+  $("symbol").addEventListener("input", function () {
+    state.draftSymbol = $("symbol").value;
+    if (!state.resolveRequestId) setStatus("actionStatus", "");
   });
 
   document.querySelectorAll(".chip").forEach(function (chip) {
@@ -413,6 +520,48 @@
     tab.addEventListener("click", function () {
       var mode = tab.getAttribute("data-mode");
       if (mode) setViewMode(mode, true);
+    });
+    tab.addEventListener("keydown", function (e) {
+      var tabs = Array.prototype.slice.call(document.querySelectorAll(".view-mode-tab"));
+      var index = tabs.indexOf(tab);
+      var next = index;
+      if (e.key === "ArrowRight" || e.key === "ArrowDown") next = (index + 1) % tabs.length;
+      if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = (index - 1 + tabs.length) % tabs.length;
+      if (next !== index) {
+        e.preventDefault();
+        tabs[next].focus();
+      } else if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        var mode = tab.getAttribute("data-mode");
+        if (mode) setViewMode(mode, true);
+      }
+    });
+  });
+
+  document.querySelectorAll(".preview-size-btn").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var size = button.getAttribute("data-preview-size") === "144" ? 144 : 72;
+      var box = document.querySelector(".preview-box");
+      var image = $("keyPreview");
+      document.querySelectorAll(".preview-size-btn").forEach(function (item) {
+        item.classList.toggle("active", item === button);
+        item.setAttribute("aria-pressed", item === button ? "true" : "false");
+      });
+      if (box) {
+        box.style.width = size + "px";
+        box.style.height = size + "px";
+      }
+      if (image) {
+        image.width = size;
+        image.height = size;
+        image.style.width = size + "px";
+        image.style.height = size + "px";
+      }
+      var placeholder = $("previewPlaceholder");
+      if (placeholder) {
+        placeholder.style.width = size + "px";
+        placeholder.style.height = size + "px";
+      }
     });
   });
 

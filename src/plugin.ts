@@ -9,6 +9,8 @@ import type { JsonValue } from "@elgato/utils";
 import type { GlobalSettingsV1, QuoteActionSettingsV1 } from "./types.js";
 import { credentialsConfigured, migrateActionSettings } from "./settings.js";
 import { createRuntime, type ActionPort } from "./runtime.js";
+import { saveValidatedGlobalSettings } from "./pi-global-settings.js";
+import { AuthSession } from "./toss/auth-session.js";
 import { safeErrorMessage, safeSerialize } from "./core/safe-log.js";
 import { safeMessageForError } from "./toss/errors.js";
 
@@ -103,11 +105,15 @@ streamDeck.ui.onDidAppear(async (ev) => {
 });
 
 streamDeck.ui.onSendToPlugin((ev) => {
+  const commandType =
+    isRecord(ev.payload) && typeof ev.payload.type === "string"
+      ? ev.payload.type
+      : "unknown";
   streamDeck.logger.debug(
     safeSerialize({
       event: "pi_send_to_plugin",
       action: ev.action.id,
-      payload: ev.payload,
+      type: commandType,
     }),
   );
   void handlePiCommand(ev.payload, ev.action.id);
@@ -153,34 +159,31 @@ async function handlePiCommand(raw: unknown, actionId: string): Promise<void> {
         break;
       }
       case "global/save": {
-        const existing = runtime.settings;
-        const rawClientId =
-          typeof command.clientId === "string" ? command.clientId.trim() : "";
-        const rawSecret =
-          typeof command.clientSecret === "string"
-            ? command.clientSecret.trim()
-            : "";
-
-        const clientId = rawClientId || existing.clientId;
-        const clientSecret =
-          rawSecret && rawSecret !== "••••••••"
-            ? rawSecret
-            : existing.clientSecret;
-
-        await runtime.updateGlobalSettings({
-          schemaVersion: 1,
-          clientId,
-          clientSecret,
-          renderMode: command.renderMode === "economy" ? "economy" : "realtime",
+        const settings = await saveValidatedGlobalSettings(runtime, command, {
+          // Validate the candidate in an isolated session. The live runtime is
+          // deliberately untouched until this official OAuth request succeeds.
+          validate: async (candidate) => {
+            await new AuthSession(candidate).test();
+          },
+          persist: async (settingsToPersist) => {
+            await streamDeck.settings.setGlobalSettings(settingsToPersist);
+          },
+          apply: async (candidate) => {
+            // Authentication and persistence are complete at this point.
+            // Reconnect and refresh quotes in the background so PI save
+            // acknowledgement stays within its bounded wait.
+            await runtime.updateGlobalSettings(candidate, {
+              deferRefresh: true,
+            });
+          },
         });
-        await streamDeck.settings.setGlobalSettings(runtime.settings);
         const configured = credentialsConfigured(runtime.settings);
         await sendPiResponse(requestId, {
           ok: true,
           isConfigured: configured,
-          settings: runtime.publicGlobalSettings(),
+          settings,
           message: configured
-            ? "전역 설정을 저장했습니다."
+            ? "인증을 확인하고 전역 설정을 저장했습니다."
             : "Client ID와 Client Secret을 입력하세요.",
         });
         break;

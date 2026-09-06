@@ -20,7 +20,8 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npm run verify
+      - run: npx playwright install --with-deps chromium
+      - run: npm run verify:all
       - run: npm run package:plugin
       - run: npm run package:smoke
       - name: Verify checksum

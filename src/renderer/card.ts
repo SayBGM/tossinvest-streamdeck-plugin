@@ -53,6 +53,20 @@ export function formatPrice(
   return `${formatted} ${currency}`;
 }
 
+function formatCompactAuxPrice(value: string | number | undefined, currency: string, showSymbol: boolean): string | undefined {
+  const parsed = numberValue(value);
+  if (parsed === undefined) return undefined;
+  const absolute = Math.abs(parsed);
+  const suffixes = currency === "KRW"
+    ? [[1e12, "조"], [1e8, "억"], [1e4, "만"]] as const
+    : [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "K"]] as const;
+  const unit = suffixes.find(([threshold]) => absolute >= threshold);
+  if (!unit) return undefined;
+  const amount = (parsed / unit[0]).toFixed(2).replace(/\.00$/, "");
+  const prefix = showSymbol ? (currency === "KRW" ? "₩" : currency === "USD" ? "$" : "") : "";
+  return `${prefix}${amount}${unit[1]}`;
+}
+
 export function formatSigned(
   value: number | undefined,
   currency: string,
@@ -133,12 +147,7 @@ export function quoteMetrics(view: QuoteView): {
   };
 }
 
-function getPriceFontSize(
-  text: string,
-  hasSymbol: boolean,
-  maxFont = 27,
-  minFont = 18,
-): number {
+function textUnits(text: string): number {
   let units = 0;
   for (const ch of text) {
     if (ch === "₩") units += 1.6;
@@ -147,14 +156,59 @@ function getPriceFontSize(
     else units += 1.0;
   }
 
-  // When currency symbol is active, scale down by 2.5px to keep comfortable padding
-  const symbolPenalty = hasSymbol ? 2.5 : 0;
+  return units;
+}
 
-  if (units <= 5.5) return Math.round(maxFont - symbolPenalty);
-  if (units <= 7.0) return Math.round(maxFont - 2 - symbolPenalty);
-  if (units <= 8.5) return Math.round(maxFont - 4 - symbolPenalty);
-  if (units <= 10.5) return Math.round(Math.max(minFont, maxFont - 6 - symbolPenalty));
-  return minFont;
+interface FittedText {
+  readonly fontSize: number;
+  readonly textLength?: number;
+}
+
+function fitText(text: string, maxWidth: number, maxFont: number, minFont: number): FittedText {
+  const units = textUnits(text);
+  let fontSize = Math.floor(maxFont);
+  const floor = Math.max(12, Math.floor(minFont));
+  while (fontSize > floor && units * fontSize * 0.56 > maxWidth) fontSize -= 1;
+  if (units * fontSize * 0.56 > maxWidth) return { fontSize: floor, textLength: maxWidth };
+  return { fontSize };
+}
+
+export interface PairedTextFit {
+  readonly left: FittedText;
+  readonly right: FittedText;
+  readonly gap: number;
+}
+
+/** Fit two opposing labels into separate 55px zones with a visible 10px center gap. */
+export function fitPairedText(
+  leftText: string,
+  rightText: string,
+  maxWidth = 120,
+  gap = 10,
+  maxFont = 16,
+  minFont = 12,
+): PairedTextFit {
+  let leftFont = Math.floor(maxFont);
+  let rightFont = Math.floor(maxFont);
+  const floor = Math.max(12, Math.floor(minFont));
+  const width = (text: string, font: number) => textUnits(text) * font * 0.56;
+  const zoneWidth = Math.min(55, Math.floor((maxWidth - gap) / 2));
+  while (leftFont > floor && rightFont > floor && (width(leftText, leftFont) > zoneWidth || width(rightText, rightFont) > zoneWidth)) {
+    if (width(leftText, leftFont) >= width(rightText, rightFont)) leftFont -= 1;
+    else rightFont -= 1;
+  }
+  const available = maxWidth - gap;
+  const leftWidth = width(leftText, leftFont);
+  const rightWidth = width(rightText, rightFont);
+  if (leftWidth + rightWidth > available) {
+    const ratio = leftWidth / Math.max(1, leftWidth + rightWidth);
+    return {
+      left: { fontSize: leftFont, textLength: Math.min(zoneWidth, Math.max(1, Math.floor(available * ratio))) },
+      right: { fontSize: rightFont, textLength: Math.min(zoneWidth, Math.max(1, Math.ceil(available * (1 - ratio)))) },
+      gap,
+    };
+  }
+  return { left: { fontSize: leftFont }, right: { fontSize: rightFont }, gap };
 }
 
 function renderSparkline(
@@ -207,7 +261,7 @@ function renderStatusScreen(view: QuoteView): string {
   switch (view.status) {
     case "auth-required":
       title = "API 키 설정 필요";
-      subtitle = subtitle || "설정창에서 Key 입력";
+      subtitle = subtitle || "설정창에서 API 키 입력";
       iconSvg = `
         <rect x="61" y="34" width="22" height="17" rx="3.5" fill="#6B7684"/>
         <path d="M65 34 V28 A7 7 0 0 1 79 28 V34" fill="none" stroke="#6B7684" stroke-width="3" stroke-linecap="round"/>
@@ -241,8 +295,8 @@ function renderStatusScreen(view: QuoteView): string {
       `;
       break;
     case "stale":
-      title = "장 마감 / 지연";
-      subtitle = subtitle || "최근 수신 시세 유지";
+      title = "지연 시세";
+      subtitle = subtitle || "최근 시세 유지";
       iconSvg = `
         <path d="M59 44 A14 14 0 1 1 85 44" fill="none" stroke="#8B95A1" stroke-width="2.5" stroke-linecap="round"/>
         <polyline points="81,41 85,45 89,41" fill="none" stroke="#8B95A1" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -250,19 +304,22 @@ function renderStatusScreen(view: QuoteView): string {
       break;
   }
 
+  const subtitleFit = fitText(subtitle.slice(0, 18), 120, 14, 12);
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
   <rect width="${WIDTH}" height="${HEIGHT}" rx="18" fill="#101013"/>
   <rect x="0.5" y="0.5" width="143" height="143" rx="17.5" fill="none" stroke="#22242B"/>
   <g>${iconSvg}</g>
-  <text x="72" y="78" text-anchor="middle" fill="#F2F4F6" font-size="13.5" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(title)}</text>
-  <text x="72" y="100" text-anchor="middle" fill="#8B95A1" font-size="11" font-weight="500" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(subtitle.slice(0, 18))}</text>
+  <text x="72" y="78" text-anchor="middle" fill="#F2F4F6" font-size="16" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(title)}</text>
+  <text x="72" y="100" text-anchor="middle" fill="#8B95A1" font-size="${subtitleFit.fontSize}"${subtitleFit.textLength ? ` textLength="${subtitleFit.textLength}" lengthAdjust="spacingAndGlyphs"` : ""} font-weight="500" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(subtitle.slice(0, 18))}</text>
   <circle cx="132" cy="132" r="3" fill="#6B7684"/>
 </svg>`;
 }
 
 export function renderQuoteCard(view: QuoteView): string {
-  if (view.status !== "ready") {
+  const delayed = view.status === "stale" && numberValue(view.lastPrice) !== undefined;
+  if (view.status !== "ready" && !delayed) {
     return renderStatusScreen(view);
   }
 
@@ -279,14 +336,9 @@ export function renderQuoteCard(view: QuoteView): string {
       ? `${metrics.arrow} ${Math.abs(metrics.rate).toFixed(2)}%`
       : "—";
 
-  const pillWidth = Math.max(50, Math.min(80, rateText.length * 7 + 14));
-  const pillHeight = 20;
-  const liveDotColor = view.refreshing ? "#FFB020" : "#00C073";
   const changeSigned = formatSigned(metrics.change, view.currency, showSymbol);
-
-  const refText = view.referencePrice
-    ? formatPrice(view.referencePrice, view.currency, showSymbol)
-    : "—";
+  const changeRateFit = fitPairedText(changeSigned, rateText);
+  const liveDotColor = view.refreshing ? "#FFB020" : "#00C073";
 
   function truncateDisplay(str: string, maxDisplayWidth: number): string {
     let width = 0;
@@ -304,60 +356,58 @@ export function renderQuoteCard(view: QuoteView): string {
 
   // 1. 차트 모드 (chart): 상단 종목명+등락률 배지, 중앙 현재가+등락폭, 하단 와이드 스파크라인
   if (viewMode === "chart") {
-    const fontSize = getPriceFontSize(priceText, showSymbol, 28, 20);
+    const priceFit = fitText(priceText, 120, 34, 24);
     const chartTitle = truncateDisplay(title, 9);
     const sparklineSvg =
       showChart && view.sparkline && view.sparkline.length >= 2
-        ? renderSparkline(view.sparkline, metrics.color, 120, 42, 12, 86)
+        ? renderSparkline(view.sparkline, metrics.color, 120, 38, 12, 94)
         : "";
 
-    const bottomText =
-      !showChart || !sparklineSvg
-        ? `<text x="12" y="112" fill="#8B95A1" font-size="12" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">변동 <tspan fill="${metrics.color}">${escapeXml(changeSigned)}</tspan></text>`
-        : "";
+    const bottomText = "";
 
     return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
   <rect width="${WIDTH}" height="${HEIGHT}" rx="18" fill="#101013"/>
   <rect x="0.5" y="0.5" width="143" height="143" rx="17.5" fill="none" stroke="#22242B"/>
-  <text x="12" y="24" fill="#F2F4F6" font-size="13" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(chartTitle)}</text>
-  <g transform="translate(${132 - pillWidth}, 10)">
-    <rect width="${pillWidth}" height="${pillHeight}" rx="5" fill="${metrics.pillBg}"/>
-    <text x="${pillWidth / 2}" y="14" text-anchor="middle" fill="${metrics.color}" font-size="11" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(rateText)}</text>
-  </g>
-  <text x="12" y="55" fill="#FFFFFF" font-size="${fontSize}" font-weight="800" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(priceText)}</text>
-  <text x="12" y="73" fill="${metrics.color}" font-size="12" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(changeSigned)}</text>
+  <text x="12" y="24" fill="#F2F4F6" font-size="16" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(chartTitle)}</text>
+  <text x="12" y="61" fill="#FFFFFF" font-size="${priceFit.fontSize}"${priceFit.textLength ? ` textLength="${priceFit.textLength}" lengthAdjust="spacingAndGlyphs"` : ""} font-weight="800" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(priceText)}</text>
+  <text x="12" y="82" fill="${metrics.color}" font-size="${changeRateFit.left.fontSize}"${changeRateFit.left.textLength ? ` textLength="${changeRateFit.left.textLength}" lengthAdjust="spacingAndGlyphs"` : ""} font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(changeSigned)}</text>
+  <text x="132" y="82" text-anchor="end" fill="${metrics.color}" font-size="${changeRateFit.right.fontSize}"${changeRateFit.right.textLength ? ` textLength="${changeRateFit.right.textLength}" lengthAdjust="spacingAndGlyphs"` : ""} font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(rateText)}</text>
   ${sparklineSvg}
   ${bottomText}
-  <circle cx="132" cy="132" r="3" fill="${liveDotColor}"/>
+  <circle cx="132" cy="132" r="3" fill="${delayed ? "#FFB020" : liveDotColor}"/>
 </svg>`;
   }
 
   // 2. 시세 모드 (detail): 상단 종목명+티커, 중앙 현재가, 등락률/등락폭, 하단 1줄 당일 고가/저가
-  const fontSize = getPriceFontSize(priceText, showSymbol, 29, 21);
+  const priceFit = fitText(priceText, 120, 34, 24);
   const highText = view.highPrice
     ? formatPrice(view.highPrice, view.currency, showSymbol)
     : undefined;
   const lowText = view.lowPrice
     ? formatPrice(view.lowPrice, view.currency, showSymbol)
     : undefined;
+  const highDisplay = highText && textUnits(highText) > 10
+    ? formatCompactAuxPrice(view.highPrice, view.currency, showSymbol) || highText
+    : highText || "—";
+  const lowDisplay = lowText && textUnits(lowText) > 10
+    ? formatCompactAuxPrice(view.lowPrice, view.currency, showSymbol) || lowText
+    : lowText || "—";
+  const highLowFit = fitPairedText(`고 ${highDisplay}`, `저 ${lowDisplay}`, 120, 10, 14, 12);
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
   <rect width="${WIDTH}" height="${HEIGHT}" rx="18" fill="#101013"/>
   <rect x="0.5" y="0.5" width="143" height="143" rx="17.5" fill="none" stroke="#22242B"/>
-  <text x="12" y="24" fill="#F2F4F6" font-size="13" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(truncateDisplay(title, 11))}</text>
-  <text x="132" y="24" text-anchor="end" fill="#8B95A1" font-size="11" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(symbol.slice(0, 6))}</text>
-  <text x="12" y="58" fill="#FFFFFF" font-size="${fontSize}" font-weight="800" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(priceText)}</text>
-  <g transform="translate(12, 70)">
-    <rect width="${pillWidth}" height="22" rx="5.5" fill="${metrics.pillBg}"/>
-    <text x="${pillWidth / 2}" y="15" text-anchor="middle" fill="${metrics.color}" font-size="11.5" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(rateText)}</text>
-  </g>
-  <text x="132" y="86" text-anchor="end" fill="${metrics.color}" font-size="13" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(changeSigned)}</text>
+  <text x="12" y="24" fill="#F2F4F6" font-size="16" font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(truncateDisplay(title, symbol ? 7 : 11))}</text>
+  <text x="132" y="24" text-anchor="end" fill="#8B95A1" font-size="12" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(symbol.slice(0, 6))}</text>
+  <text x="12" y="61" fill="#FFFFFF" font-size="${priceFit.fontSize}"${priceFit.textLength ? ` textLength="${priceFit.textLength}" lengthAdjust="spacingAndGlyphs"` : ""} font-weight="800" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(priceText)}</text>
+  <text x="12" y="87" fill="${metrics.color}" font-size="${changeRateFit.left.fontSize}"${changeRateFit.left.textLength ? ` textLength="${changeRateFit.left.textLength}" lengthAdjust="spacingAndGlyphs"` : ""} font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(changeSigned)}</text>
+  <text x="132" y="87" text-anchor="end" fill="${metrics.color}" font-size="${changeRateFit.right.fontSize}"${changeRateFit.right.textLength ? ` textLength="${changeRateFit.right.textLength}" lengthAdjust="spacingAndGlyphs"` : ""} font-weight="700" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">${escapeXml(rateText)}</text>
   <line x1="12" y1="104" x2="132" y2="104" stroke="#22242B" stroke-width="1"/>
-  <text x="12" y="124" fill="#8B95A1" font-size="10.5" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">고 <tspan fill="#F2F4F6" font-weight="700">${escapeXml(highText || "—")}</tspan></text>
-  <text x="126" y="124" text-anchor="end" fill="#8B95A1" font-size="10.5" font-weight="600" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">저 <tspan fill="#F2F4F6" font-weight="700">${escapeXml(lowText || "—")}</tspan></text>
-  <circle cx="134" cy="120" r="2.5" fill="${liveDotColor}"/>
+  <text x="12" y="126" fill="#8B95A1" font-size="${highLowFit.left.fontSize}"${highLowFit.left.textLength ? ` textLength="${highLowFit.left.textLength}" lengthAdjust="spacingAndGlyphs"` : ""} font-weight="600" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">고 <tspan fill="#F2F4F6" font-weight="700">${escapeXml(highDisplay)}</tspan></text>
+  <text x="126" y="126" text-anchor="end" fill="#8B95A1" font-size="${highLowFit.right.fontSize}"${highLowFit.right.textLength ? ` textLength="${highLowFit.right.textLength}" lengthAdjust="spacingAndGlyphs"` : ""} font-weight="600" font-family="-apple-system,BlinkMacSystemFont,'Pretendard','Segoe UI',sans-serif">저 <tspan fill="#F2F4F6" font-weight="700">${escapeXml(lowDisplay)}</tspan></text>
+  <circle cx="134" cy="120" r="2.5" fill="${delayed ? "#FFB020" : liveDotColor}"/>
 </svg>`;
 }
 
