@@ -12,10 +12,8 @@ import { resolve } from "node:path";
 
 const output = resolve("dist");
 mkdirSync(output, { recursive: true });
-for (const name of [
-  "com.saybgm.tossinvest.streamDeckPlugin",
-  "com.saybgm.tossinvest-v0.1.0.streamDeckPlugin",
-]) {
+for (const name of readdirSync(output)) {
+  if (!name.endsWith(".streamDeckPlugin") && name !== "SHA256SUMS") continue;
   const path = resolve(output, name);
   if (existsSync(path)) rmSync(path, { force: true });
 }

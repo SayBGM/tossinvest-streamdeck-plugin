@@ -20,7 +20,11 @@ if (missing.length)
 const manifest = JSON.parse(
   readFileSync(resolve(root, "manifest.json"), "utf8"),
 );
-if (manifest.UUID !== "com.saybgm.tossinvest" || manifest.Version !== "0.1.0.0")
+const packageVersion = JSON.parse(readFileSync("package.json", "utf8")).version;
+if (
+  manifest.UUID !== "com.saybgm.tossinvest" ||
+  manifest.Version !== `${packageVersion}.0`
+)
   throw new Error("manifest 식별자/버전이 예상과 다릅니다.");
 if (
   !manifest.Actions?.some(
