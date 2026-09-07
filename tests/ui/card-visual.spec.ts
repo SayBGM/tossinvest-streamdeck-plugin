@@ -174,13 +174,13 @@ test("144px 원본과 96px·72px 축소 카드가 안정적으로 보인다", as
     <html lang="ko">
       <style>
         * { box-sizing: border-box; }
-        body { margin: 0; padding: 24px; color: #f2f4f6; background: #0d0e11; font: 14px Arial, sans-serif; }
+        body { margin: 0; padding: 24px; color: #f2f4f6; background: #0d0e11; font: 14px Arial, sans-serif; line-height: 1.2; }
         section { margin-bottom: 24px; }
-        h2 { margin: 0 0 10px; font-size: 18px; }
+        h2 { height: 22px; margin: 0 0 10px; font-size: 18px; line-height: 22px; }
         .cards { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
-        figure { width: 130px; margin: 0; display: grid; justify-items: center; gap: 7px; }
+        figure { width: 130px; margin: 0; display: grid; grid-template-rows: auto 28px; justify-items: center; gap: 7px; }
         img { display: block; border-radius: 12px; image-rendering: auto; }
-        figcaption { color: #b0b8c1; font-size: 12px; text-align: center; }
+        figcaption { height: 28px; color: #b0b8c1; font-size: 12px; line-height: 14px; text-align: center; }
       </style>
       <body>${sections}</body>
     </html>`);

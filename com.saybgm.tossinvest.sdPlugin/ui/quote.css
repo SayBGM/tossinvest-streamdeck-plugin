@@ -6,6 +6,7 @@
     "Pretendard",
     "Segoe UI",
     sans-serif;
+  line-height: 1.4;
   --bg-main: #141518;
   --bg-card: #1c1e23;
   --bg-input: #121316;
@@ -56,6 +57,7 @@ h2 {
   font-size: 17px;
   font-weight: 700;
   letter-spacing: -0.2px;
+  line-height: 1.25;
 }
 
 h2 {
@@ -95,6 +97,7 @@ label {
   color: var(--text-secondary);
   font-size: 14px;
   font-weight: 600;
+  line-height: 20px;
 }
 
 input,
@@ -109,6 +112,7 @@ select {
   background: var(--bg-input);
   min-height: 36px;
   font-size: 14px;
+  line-height: 18px;
   outline: none;
   transition: border-color 0.15s ease;
 }
@@ -162,6 +166,7 @@ button {
   min-height: 36px;
   font-size: 14px;
   font-weight: 600;
+  line-height: 18px;
   cursor: pointer;
   transition: background 0.15s ease;
 }
