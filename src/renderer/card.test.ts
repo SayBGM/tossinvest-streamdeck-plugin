@@ -152,6 +152,20 @@ describe("quote card", () => {
     expect(invalidSvg).toContain("종목 확인 필요");
   });
 
+  it("keeps a delayed price card while showing its REST fallback reason", () => {
+    const svg = renderQuoteCard({
+      ...baseKrView,
+      status: "stale",
+      message: "실시간 구독 한도 100종목 초과 · 시세를 주기적으로 조회합니다.",
+      lastPrice: "74200",
+      referencePrice: "72000",
+      sparkline: [72000, 74200],
+    });
+    expect(svg).toContain("₩74,200");
+    expect(svg).toContain("주기 조회");
+    expect(svg).toContain("실시간");
+  });
+
   it("renders sparkline chart when candles are available in chart mode", () => {
     const svg = renderQuoteCard({
       symbol: "005930",

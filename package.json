@@ -1,6 +1,6 @@
 {
   "name": "tossinvest-streamdeck-plugin",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Unofficial Toss Securities quote plugin for Stream Deck",
   "type": "module",
   "private": true,
@@ -17,7 +17,7 @@
     "verify:all": "npm run verify && npm run test:ui",
     "local:install": "npm run build && node ./scripts/install-local-plugin.mjs",
     "package:plugin": "npm run build && node scripts/package-plugin.mjs",
-    "package:smoke": "node scripts/verify-package.mjs && node scripts/runtime-smoke.mjs && node scripts/verify-plugin-runtime.mjs"
+    "package:smoke": "node scripts/verify-package.mjs && node scripts/runtime-smoke.mjs && node scripts/verify-plugin-runtime.mjs && node scripts/verify-pi-transport.mjs && node scripts/verify-pi-host-runtime.mjs"
   },
   "engines": {
     "node": ">=20"

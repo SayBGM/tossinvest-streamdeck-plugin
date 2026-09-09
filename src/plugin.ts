@@ -9,7 +9,7 @@ import type { JsonValue } from "@elgato/utils";
 import type { GlobalSettingsV1, QuoteActionSettingsV1 } from "./types.js";
 import { credentialsConfigured, migrateActionSettings } from "./settings.js";
 import { createRuntime, type ActionPort } from "./runtime.js";
-import { saveValidatedGlobalSettings } from "./pi-global-settings.js";
+import { saveDisplaySettings, saveValidatedGlobalSettings } from "./pi-global-settings.js";
 import { AuthSession } from "./toss/auth-session.js";
 import { safeErrorMessage, safeSerialize } from "./core/safe-log.js";
 import { safeMessageForError } from "./toss/errors.js";
@@ -105,6 +105,8 @@ streamDeck.ui.onDidAppear(async (ev) => {
     type: "init",
     globalSettings: runtime.publicGlobalSettings(),
     isConfigured: credentialsConfigured(runtime.settings),
+    connectionState: runtime.socket.currentState,
+    quoteStatus: runtime.quoteStatus(ev.action.id),
   } as unknown as JsonValue);
 });
 
@@ -120,12 +122,31 @@ streamDeck.ui.onSendToPlugin((ev) => {
       type: commandType,
     }),
   );
-  void handlePiCommand(ev.payload, ev.action.id);
+  void handlePiCommand(ev.payload, ev.action.id).catch((error: unknown) => {
+    streamDeck.logger.warn(safeSerialize({
+      event: "pi_response_failed",
+      error: safeErrorMessage(error),
+    }));
+  });
 });
 
 streamDeck.settings.onDidReceiveGlobalSettings((ev) => {
-  void runtime.updateGlobalSettings(ev.settings);
+  void runtime.updateGlobalSettings(ev.settings).catch((error: unknown) => {
+    streamDeck.logger.warn(safeSerialize({
+      event: "global_settings_update_failed",
+      error: safeErrorMessage(error),
+    }));
+  });
 });
+
+// Serialize credential validation and preference saves so a delayed OAuth
+// response cannot restore credentials captured by another settings write.
+let settingsSaveTail: Promise<unknown> = Promise.resolve();
+function queueSettingsSave<T>(operation: () => Promise<T>): Promise<T> {
+  const result = settingsSaveTail.then(operation);
+  settingsSaveTail = result.catch(() => undefined);
+  return result;
+}
 
 async function handlePiCommand(raw: unknown, actionId: string): Promise<void> {
   const command = isRecord(raw) ? (raw as PiCommand) : {};
@@ -159,11 +180,13 @@ async function handlePiCommand(raw: unknown, actionId: string): Promise<void> {
           type: "init",
           globalSettings: runtime.publicGlobalSettings(),
           isConfigured: credentialsConfigured(runtime.settings),
+          connectionState: runtime.socket.currentState,
+          quoteStatus: runtime.quoteStatus(actionId),
         });
         break;
       }
       case "global/save": {
-        const settings = await saveValidatedGlobalSettings(runtime, command, {
+        const settings = await queueSettingsSave(() => saveValidatedGlobalSettings(runtime, command, {
           // Validate the candidate in an isolated session. The live runtime is
           // deliberately untouched until this official OAuth request succeeds.
           validate: async (candidate) => {
@@ -180,7 +203,7 @@ async function handlePiCommand(raw: unknown, actionId: string): Promise<void> {
               deferRefresh: true,
             });
           },
-        });
+        }));
         const configured = credentialsConfigured(runtime.settings);
         await sendPiResponse(requestId, {
           ok: true,
@@ -189,6 +212,20 @@ async function handlePiCommand(raw: unknown, actionId: string): Promise<void> {
           message: configured
             ? "인증을 확인하고 전역 설정을 저장했습니다."
             : "Client ID와 Client Secret을 입력하세요.",
+        });
+        break;
+      }
+      case "display/save": {
+        const settings = await queueSettingsSave(() => saveDisplaySettings(
+          runtime,
+          command,
+          async (candidate) => streamDeck.settings.setGlobalSettings(candidate),
+        ));
+        await sendPiResponse(requestId, {
+          ok: true,
+          settings,
+          isConfigured: credentialsConfigured(runtime.settings),
+          message: "표시 설정을 저장했습니다.",
         });
         break;
       }

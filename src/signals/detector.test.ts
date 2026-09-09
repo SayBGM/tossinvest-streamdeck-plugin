@@ -28,6 +28,8 @@ describe("detectSignal", () => {
       baseInput({ lastPrice: 77000, referencePrice: 70000 }),
     );
     expect(signal).toBeUndefined();
+    expect(memory.firedRateUpTo).toBe(2);
+    expect(memory.firedRateDownTo).toBe(0);
   });
 
   it("fires once when crossing +10%", () => {
@@ -146,6 +148,40 @@ describe("detectSignal", () => {
       baseInput({ lastPrice: 140, referencePrice: 100 }),
     );
     expect(forty).toMatchObject({ label: "40% 상승" });
+  });
+
+  it("records extreme finite rate levels without iterating through intermediate levels", () => {
+    const memory = createSignalMemory();
+    detectSignal(memory, baseInput({ lastPrice: 1, referencePrice: 1 })); // arm
+
+    const signal = detectSignal(
+      memory,
+      baseInput({ lastPrice: 1e100, referencePrice: 1 }),
+    );
+
+    expect(signal).toMatchObject({ kind: "rate-up" });
+    expect(memory.firedRateUpTo).toBe(Math.floor(1e102 / 5));
+    expect(memory.firedRateDownTo).toBe(0);
+
+    // A lower level after the jump is already represented by the maximum.
+    expect(
+      detectSignal(memory, baseInput({ lastPrice: 1e99, referencePrice: 1 })),
+    ).toBeUndefined();
+  });
+
+  it("tracks positive and negative rate levels independently", () => {
+    const memory = createSignalMemory();
+    detectSignal(memory, baseInput({ lastPrice: 100, referencePrice: 100 })); // arm
+
+    detectSignal(memory, baseInput({ lastPrice: 120, referencePrice: 100 }));
+    const down = detectSignal(
+      memory,
+      baseInput({ lastPrice: 80, referencePrice: 100 }),
+    );
+
+    expect(down).toMatchObject({ kind: "rate-down", label: "20% 하락" });
+    expect(memory.firedRateUpTo).toBe(4);
+    expect(memory.firedRateDownTo).toBe(4);
   });
 
   it("fires ma-break-up and ma-break-down once each per crossing direction", () => {

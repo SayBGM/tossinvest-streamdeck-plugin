@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   candidateGlobalSettings,
+  saveDisplaySettings,
   saveValidatedGlobalSettings,
   type GlobalSettingsRuntime,
 } from "./pi-global-settings.js";
@@ -132,5 +133,28 @@ describe("PI global credential commit", () => {
     ]);
     expect(runtime.settings.clientSecret).toBe("new-secret");
     expect(result.clientSecret).toBe("••••••••");
+  });
+});
+
+describe("PI display preference commit", () => {
+  it("preserves credentials and masks the response without authenticating", async () => {
+    const runtime = fakeRuntime();
+    const persist = vi.fn(async () => undefined);
+    const input = { clientId: "ignored", clientSecret: "ignored", renderMode: "economy", signalDurationSec: 10 };
+    const result = await saveDisplaySettings(runtime, input, persist);
+    expect(persist).toHaveBeenCalledWith({ ...existing, renderMode: "economy", signalDurationSec: 10 });
+    expect(runtime.settings.clientSecret).toBe(existing.clientSecret);
+    expect(result.clientSecret).toBe("••••••••");
+    expect(result.clientId).toBe(existing.clientId);
+  });
+
+  it("preserves omitted preferences and does not apply a failed write", async () => {
+    const runtime = fakeRuntime();
+    await saveDisplaySettings(runtime, { renderMode: "economy" }, async () => undefined);
+    expect(runtime.settings.signalDurationSec).toBe(5);
+    await expect(saveDisplaySettings(runtime, { signalDurationSec: 10 }, async () => {
+      throw new Error("write failed");
+    })).rejects.toThrow("write failed");
+    expect(runtime.settings).toEqual({ ...existing, renderMode: "economy" });
   });
 });

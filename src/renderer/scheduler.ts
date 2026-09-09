@@ -25,6 +25,7 @@ export class RenderScheduler {
   private readonly queue = new Map<string, QueueEntry>();
   private targetOrder: string[] = [];
   private queueTimer?: ReturnType<typeof setTimeout>;
+  private committing = false;
   private lastCommitAt = 0;
   private generation = 0;
   private destroyed = false;
@@ -104,7 +105,7 @@ export class RenderScheduler {
   }
 
   private drainQueue(): void {
-    if (this.queueTimer || this.destroyed || this.queue.size === 0) return;
+    if (this.queueTimer || this.committing || this.destroyed || this.queue.size === 0) return;
     // Stream Deck's programmatic update budget is global to the plugin.
     // Keep commits at most once every 100ms (10/second); pending frames are
     // still coalesced per target and drained fairly below.
@@ -113,14 +114,30 @@ export class RenderScheduler {
       this.queueTimer = undefined;
       const entry = this.nextEntry();
       if (!entry) return;
-      void Promise.resolve(entry.request.commit(entry.image)).finally(() => {
-        if (this.targets.get(entry.target.id) === entry.target) {
-          entry.target.lastKey = entry.request.key;
-          entry.target.lastImage = entry.image;
-        }
-        this.lastCommitAt = Date.now();
-        this.drainQueue();
-      });
+      this.committing = true;
+      void Promise.resolve()
+        .then(() => {
+          if (this.destroyed || this.targets.get(entry.target.id) !== entry.target) return;
+          return entry.request.commit(entry.image);
+        })
+        .then(() => {
+          // A failed commit must remain eligible for a later retry. Also do
+          // not let a completion from a removed/replaced target update state.
+          if (this.targets.get(entry.target.id) === entry.target) {
+            entry.target.lastKey = entry.request.key;
+            entry.target.lastImage = entry.image;
+          }
+        })
+        .catch(() => {
+          if (this.targets.get(entry.target.id) === entry.target && !this.queue.has(entry.target.id)) {
+            this.queue.set(entry.target.id, entry);
+          }
+        })
+        .finally(() => {
+          this.committing = false;
+          this.lastCommitAt = Date.now();
+          this.drainQueue();
+        });
     }, wait);
   }
 

@@ -1,12 +1,10 @@
 import type { Action } from "@elgato/streamdeck";
 import type {
-  Candle,
   GlobalSettingsV1,
   Market,
   QuoteActionSettingsV1,
   QuoteView,
   Signal,
-  StockInfo,
   TradeTick,
 } from "./types.js";
 import {
@@ -20,18 +18,26 @@ import { AuthSession } from "./toss/auth-session.js";
 import { TossError, safeMessageForError } from "./toss/errors.js";
 import {
   TossRestClient,
-  marketDate,
   selectReferencePrice,
 } from "./toss/rest-client.js";
 import { TossWebSocket } from "./toss/websocket.js";
+import { isPriceText } from "./toss/response-validation.js";
 import { safeErrorMessage, safeSerialize } from "./core/safe-log.js";
-import {
-  createSignalMemory,
-  detectSignal,
-  type SignalInput,
-  type SignalMemory,
-} from "./signals/detector.js";
+import { detectSignal, type SignalInput } from "./signals/detector.js";
 import { movingAverage, signalSessionKey } from "./signals/indicators.js";
+import {
+  acceptsPriceUpdate,
+  beginQuoteSession,
+  createQuoteState,
+  isQuoteSessionContextCurrent,
+  mergeQuoteHighLow,
+  numberOrUndefined,
+  sessionDateFor,
+  timestampMillis,
+  type QuoteState,
+} from "./runtime/quote-state.js";
+import { chunkSymbols, RefreshCoordinator } from "./runtime/refresh-coordinator.js";
+import { planSubscriptions } from "./runtime/subscription-plan.js";
 
 export interface ActionPort {
   readonly id: string;
@@ -45,38 +51,14 @@ interface Binding {
   settings: QuoteActionSettingsV1;
 }
 
-interface QuoteState {
-  readonly symbol: string;
-  info?: StockInfo;
-  lastPrice?: string;
-  referencePrice?: string;
-  highPrice?: string;
-  lowPrice?: string;
-  candles?: Candle[];
-  sparkline?: number[];
-  timestamp?: string | null;
-  status: QuoteView["status"];
-  message?: string;
-  refreshing?: boolean;
-  market?: Market;
-  priceLimit?: { upper?: number; lower?: number; date: string };
-  movingAverages?: SignalInput["movingAverages"];
-  readonly signalMemory: SignalMemory;
-  activeSignal?: { signal: Signal; timer: ReturnType<typeof setTimeout> };
-}
-
 export interface PiSender {
   (actionId: string, message: unknown): Promise<void>;
 }
 
 const ACTION_UUID = "com.saybgm.tossinvest.quote";
-const REFRESH_DEBOUNCE_MS = 200;
-
-function numberOrUndefined(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
+const SUBSCRIPTION_LIMIT_MESSAGE =
+  "실시간 구독 한도 100종목 초과 · 시세를 주기적으로 조회합니다. 다른 종목 키를 제거하면 자동 복구됩니다.";
+const CURRENCY_MISMATCH_MESSAGE = "시세 통화 정보가 종목 정보와 일치하지 않습니다.";
 
 export class QuoteRuntime {
   readonly auth: AuthSession;
@@ -90,9 +72,9 @@ export class QuoteRuntime {
   private readonly openUrlImpl?: (url: string) => Promise<void>;
   private refreshTimer?: ReturnType<typeof setTimeout>;
   private destroyed = false;
-  private refreshWaiters: Array<() => void> = [];
-  private refreshDebounce?: ReturnType<typeof setTimeout>;
-  private refreshInFlight?: Promise<void>;
+  private readonly refreshes = new RefreshCoordinator();
+  private refreshEpoch = 0;
+  private readonly quoteStatusPushes = new Map<string, string>();
 
   constructor(
     options: {
@@ -125,13 +107,18 @@ export class QuoteRuntime {
         const symbol = match[1];
         if (!symbol) return;
         const quote = this.quotes.get(symbol);
-        if (quote && !quote.lastPrice) {
-          quote.status = "invalid-symbol";
-          quote.message =
-            reason === "stock-not-found"
+        if (quote) {
+          quote.subscriptionRejected = true;
+          if (quote.lastPrice) {
+            quote.status = "stale";
+            quote.message = "실시간 구독을 할 수 없어 REST 시세를 표시합니다.";
+          } else {
+            quote.status = "invalid-symbol";
+            quote.message = reason === "stock-not-found"
               ? "종목을 찾을 수 없습니다."
               : "구독할 수 없는 종목입니다.";
-          void this.renderAll();
+          }
+          void this.renderSymbol(symbol);
         }
       },
     });
@@ -165,6 +152,7 @@ export class QuoteRuntime {
       await this.renderAll();
     }
     if (changed) {
+      this.refreshEpoch += 1;
       this.socket.restart();
       for (const quote of this.quotes.values()) {
         quote.status = "connecting";
@@ -206,9 +194,14 @@ export class QuoteRuntime {
     const interval = this.globalSettings.renderMode === "economy" ? 1_000 : 100;
     const generation = this.scheduler.activate(action.id, interval);
     this.bindings.set(action.id, { action, generation, settings });
-    this.ensureQuote(settings.symbol);
+    const quote = this.ensureQuote(settings.symbol);
     await this.renderAction(action.id);
-    await this.refreshAll();
+    const requiresRefresh = !previous ||
+      previous.settings.symbol !== settings.symbol ||
+      previous.settings.market !== settings.market ||
+      !quote?.info;
+    if (requiresRefresh) await this.refreshAll();
+    else this.reconcileSubscriptions();
   }
 
   disappear(actionId: string): void {
@@ -216,6 +209,7 @@ export class QuoteRuntime {
     if (!binding) return;
     this.scheduler.remove(actionId, binding.generation);
     this.bindings.delete(actionId);
+    this.quoteStatusPushes.delete(actionId);
     this.reconcileSubscriptions();
   }
 
@@ -324,6 +318,16 @@ export class QuoteRuntime {
     return this.sanitizedGlobalSettings();
   }
 
+  /** Safe current state for a Property Inspector that opens after a render. */
+  quoteStatus(actionId: string):
+    | { readonly status: QuoteView["status"]; readonly message?: string; readonly live: boolean }
+    | undefined {
+    const binding = this.bindings.get(actionId);
+    if (!binding) return undefined;
+    const view = this.viewFor(binding.settings);
+    return { status: view.status, message: view.message, live: view.live === true };
+  }
+
   async sendPush(message: unknown): Promise<void> {
     if (!this.piSender) return;
     for (const actionId of this.bindings.keys()) {
@@ -338,16 +342,9 @@ export class QuoteRuntime {
   async destroy(): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.refreshEpoch += 1;
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
-    if (this.refreshDebounce) {
-      clearTimeout(this.refreshDebounce);
-      this.refreshDebounce = undefined;
-    }
-    if (this.refreshWaiters.length > 0) {
-      const waiters = this.refreshWaiters;
-      this.refreshWaiters = [];
-      for (const w of waiters) w();
-    }
+    this.refreshes.destroy();
     for (const quote of this.quotes.values()) {
       if (quote.activeSignal) {
         clearTimeout(quote.activeSignal.timer);
@@ -357,6 +354,7 @@ export class QuoteRuntime {
     this.socket.stop();
     this.scheduler.destroy();
     this.bindings.clear();
+    this.quoteStatusPushes.clear();
   }
 
   private sanitizedGlobalSettings(): GlobalSettingsV1 {
@@ -373,54 +371,23 @@ export class QuoteRuntime {
     if (!symbol) return undefined;
     const existing = this.quotes.get(symbol);
     if (existing) return existing;
-    const quote: QuoteState = {
-      symbol,
-      status: "connecting",
-      signalMemory: createSignalMemory(),
-    };
+    const quote = createQuoteState(symbol);
     this.quotes.set(symbol, quote);
     return quote;
   }
 
   private refreshAll(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      this.refreshWaiters.push(resolve);
-      this.scheduleRefreshBatch();
-    });
+    return this.refreshes.requestBatch(
+      () => this.performRefresh(),
+      () => this.destroyed,
+    );
   }
 
-  private scheduleRefreshBatch(): void {
-    if (this.refreshDebounce || this.refreshInFlight) return;
-    this.refreshDebounce = setTimeout(() => {
-      this.refreshDebounce = undefined;
-      if (this.destroyed) {
-        const waiters = this.refreshWaiters;
-        this.refreshWaiters = [];
-        for (const w of waiters) w();
-        return;
-      }
-      const waiters = this.refreshWaiters;
-      this.refreshWaiters = [];
-      const run = this.performRefresh()
-        .catch(() => undefined)
-        .finally(() => {
-          this.refreshInFlight = undefined;
-          for (const w of waiters) w();
-          if (this.refreshWaiters.length > 0) this.scheduleRefreshBatch();
-        });
-      this.refreshInFlight = run;
-    }, REFRESH_DEBOUNCE_MS);
-  }
-
-  private async performRefresh(): Promise<void> {
+  private async performRefresh(symbolsOverride?: readonly string[]): Promise<void> {
     if (this.destroyed) return;
-    const symbols = [
-      ...new Set(
-        [...this.bindings.values()]
-          .map((binding) => binding.settings.symbol)
-          .filter(Boolean),
-      ),
-    ];
+    const refreshEpoch = this.refreshEpoch;
+    const symbols = [...new Set(symbolsOverride ??
+      [...this.bindings.values()].map((binding) => binding.settings.symbol).filter(Boolean))];
     if (symbols.length === 0) return;
     if (!this.auth.isConfigured()) {
       for (const symbol of symbols) {
@@ -435,16 +402,21 @@ export class QuoteRuntime {
     }
     for (const symbol of symbols) this.ensureQuote(symbol);
     try {
-      const [infos, prices] = await Promise.all([
-        this.rest.getStocks(symbols),
-        this.rest.getPrices(symbols),
+      const batches = chunkSymbols(symbols);
+      const [infoBatches, priceBatches] = await Promise.all([
+        Promise.all(batches.map((batch) => this.rest.getStocks(batch))),
+        Promise.all(batches.map((batch) => this.rest.getPrices(batch))),
       ]);
+      const infos = infoBatches.flat();
+      const prices = priceBatches.flat();
+      if (this.destroyed || refreshEpoch !== this.refreshEpoch) return;
       const infosBySymbol = new Map(
         infos.map((info) => [info.symbol.toUpperCase(), info]),
       );
       const pricesBySymbol = new Map(
         prices.map((price) => [price.symbol.toUpperCase(), price]),
       );
+      const contexts: Array<{ symbol: string; quote: QuoteState; market: Market }> = [];
       for (const symbol of symbols) {
         const quote = this.ensureQuote(symbol);
         if (!quote) continue;
@@ -460,19 +432,80 @@ export class QuoteRuntime {
           }
           continue;
         }
+        if (info.currency !== price.currency) {
+          quote.status = quote.lastPrice ? "stale" : "invalid-symbol";
+          quote.message = CURRENCY_MISMATCH_MESSAGE;
+          continue;
+        }
         quote.info = info;
-        quote.lastPrice = price.lastPrice;
-        quote.timestamp = price.timestamp;
-        quote.status = "ready";
         const market: Market =
           info.market === "US" || info.currency === "USD" ? "US" : "KR";
         quote.market = market;
+        const acceptsPrice = acceptsPriceUpdate(
+          quote.timestamp,
+          price.timestamp,
+          "rest",
+        );
+        const currentTimestamp = timestampMillis(quote.timestamp);
+        const priceTimestamp = timestampMillis(price.timestamp);
+        const sameTimestamp = currentTimestamp !== undefined &&
+          currentTimestamp === priceTimestamp;
+        const priceSessionDate = sessionDateFor(price.timestamp, market);
+        if (acceptsPrice && priceSessionDate) {
+          beginQuoteSession(quote, priceSessionDate, price.lastPrice);
+        }
+        if (acceptsPrice) {
+          quote.lastPrice = price.lastPrice;
+          quote.timestamp = price.timestamp;
+        }
+        // A credential change may yield the same REST snapshot as the last
+        // live tick. It is still a valid confirmation that the quote can be
+        // shown again, but it must not turn a rejected subscription into live.
+        if (acceptsPrice || sameTimestamp) {
+          if (quote.subscriptionCapped) {
+            quote.status = quote.lastPrice ? "stale" : "no-data";
+            quote.message = SUBSCRIPTION_LIMIT_MESSAGE;
+          } else if (quote.subscriptionRejected) {
+            quote.status = quote.lastPrice ? "stale" : "invalid-symbol";
+            quote.message = quote.lastPrice
+              ? "실시간 구독을 할 수 없어 REST 시세를 표시합니다."
+              : "구독할 수 없는 종목입니다.";
+          } else {
+            quote.status = "ready";
+            quote.message = undefined;
+          }
+        }
+        contexts.push({ symbol, quote, market });
+      }
+
+      // Metadata is sufficient to validate and subscribe. Start that before
+      // the slower per-symbol daily-candle calls so live ticks are not held
+      // behind 130-day history retrieval.
+      this.reconcileSubscriptions();
+      await this.renderAll();
+
+      for (const { symbol, quote, market } of contexts) {
+        // Overflow keys already have the latest REST price. Avoid one candle
+        // and one price-limit request per overflow symbol until a socket slot
+        // is restored for it.
+        if (quote.subscriptionCapped) continue;
+        if (this.destroyed || refreshEpoch !== this.refreshEpoch) return;
+        const contextTimestamp = quote.timestamp;
+        const contextSessionDate = sessionDateFor(contextTimestamp, market);
+        const contextSessionVersion = quote.sessionVersion;
         try {
           const candles = await this.rest.getCandles(symbol, 130);
+          if (this.destroyed || refreshEpoch !== this.refreshEpoch) return;
+          if (!isQuoteSessionContextCurrent(
+            quote,
+            market,
+            contextSessionDate,
+            contextSessionVersion,
+          )) continue;
           quote.candles = candles;
           quote.referencePrice = selectReferencePrice(
             candles,
-            price.timestamp,
+            quote.timestamp,
             market,
           );
 
@@ -486,41 +519,65 @@ export class QuoteRuntime {
           const sparkline = recent
             .map((c) => Number(c.closePrice))
             .filter((val) => Number.isFinite(val));
-          if (price.lastPrice && Number.isFinite(Number(price.lastPrice))) {
+          if (quote.lastPrice && Number.isFinite(Number(quote.lastPrice))) {
             if (sparkline.length > 0) {
-              sparkline[sparkline.length - 1] = Number(price.lastPrice);
+              sparkline[sparkline.length - 1] = Number(quote.lastPrice);
             } else {
-              sparkline.push(Number(price.lastPrice));
+              sparkline.push(Number(quote.lastPrice));
             }
           }
           quote.sparkline = sparkline;
 
           const latestCandle = chronological[chronological.length - 1];
-          if (latestCandle) {
-            quote.highPrice = latestCandle.highPrice;
-            quote.lowPrice = latestCandle.lowPrice;
+          if (
+            latestCandle &&
+            sessionDateFor(latestCandle.timestamp, market) === contextSessionDate
+          ) {
+            mergeQuoteHighLow(quote, latestCandle.highPrice, latestCandle.lowPrice);
+          }
+          const latestPrice = numberOrUndefined(quote.lastPrice);
+          if (latestPrice !== undefined) {
+            mergeQuoteHighLow(quote, quote.lastPrice, quote.lastPrice);
           }
 
           quote.movingAverages = ([20, 60, 120] as const)
             .map((period) => ({
               period,
-              value: movingAverage(candles, period, price.timestamp, market),
+              value: movingAverage(candles, period, quote.timestamp, market),
             }))
             .filter(
               (entry): entry is { period: 20 | 60 | 120; value: number } =>
                 entry.value !== undefined,
             );
+          if (contextSessionDate) {
+            quote.sessionDate = contextSessionDate;
+            quote.pendingSessionDate = undefined;
+          }
         } catch {
+          if (this.destroyed || refreshEpoch !== this.refreshEpoch) return;
+          if (!isQuoteSessionContextCurrent(
+            quote,
+            market,
+            contextSessionDate,
+            contextSessionVersion,
+          )) continue;
           quote.referencePrice = undefined;
           quote.sparkline = undefined;
           quote.movingAverages = undefined;
         }
 
-        if (market === "KR") {
-          const today = marketDate(price.timestamp ?? new Date().toISOString(), market);
+        if (market === "KR" && contextSessionDate) {
+          const today = contextSessionDate;
           if (quote.priceLimit?.date !== today) {
             try {
               const limit = await this.rest.getPriceLimit(symbol);
+              if (this.destroyed || refreshEpoch !== this.refreshEpoch) return;
+              if (!isQuoteSessionContextCurrent(
+                quote,
+                market,
+                contextSessionDate,
+                contextSessionVersion,
+              )) continue;
               quote.priceLimit = {
                 upper: limit.upperLimitPrice !== undefined
                   ? Number(limit.upperLimitPrice)
@@ -539,9 +596,9 @@ export class QuoteRuntime {
 
         this.evaluateSignals(quote);
       }
-      this.reconcileSubscriptions();
       await this.renderAll();
     } catch (error) {
+      if (this.destroyed || refreshEpoch !== this.refreshEpoch) return;
       const message = safeMessageForError(error);
       for (const symbol of symbols) {
         const quote = this.ensureQuote(symbol);
@@ -566,7 +623,12 @@ export class QuoteRuntime {
       await this.renderAll();
       return false;
     }
-    await this.refreshAll();
+    await this.refreshes.requestSymbol(
+      symbol,
+      () => this.quotes.get(symbol)?.sessionVersion,
+      () => this.performRefresh([symbol]),
+      () => this.destroyed,
+    );
     const refreshed = this.quotes.get(symbol)?.status === "ready";
     if (immediate) {
       for (const binding of this.bindings.values()) {
@@ -578,45 +640,59 @@ export class QuoteRuntime {
   }
 
   private reconcileSubscriptions(): void {
-    const entries: Array<readonly [string, "KR" | "US"]> = [];
-    const seen = new Set<string>();
-    for (const binding of this.bindings.values()) {
-      const symbol = binding.settings.symbol;
-      const info = this.quotes.get(symbol)?.info;
-      let market = binding.settings.market;
-      if (!market && info) {
-        try {
-          market = this.rest.marketFor(info);
-        } catch {
-          market = undefined;
-        }
+    const plan = planSubscriptions(this.bindings.values(), this.quotes, (info) =>
+      this.rest.marketFor(info),
+    );
+    const activeSymbols = new Set(
+      [...this.bindings.values()].map((binding) => binding.settings.symbol).filter(Boolean),
+    );
+    for (const symbol of activeSymbols) {
+      const quote = this.quotes.get(symbol);
+      if (!quote?.info) continue;
+      const capped = plan.cappedSymbols.has(symbol);
+      if (quote.subscriptionCapped === capped) continue;
+      quote.subscriptionCapped = capped;
+      if (capped) {
+        quote.status = quote.lastPrice ? "stale" : "no-data";
+        quote.message = SUBSCRIPTION_LIMIT_MESSAGE;
+      } else if (quote.message === SUBSCRIPTION_LIMIT_MESSAGE) {
+        quote.status = quote.lastPrice ? "ready" : "connecting";
+        quote.message = undefined;
       }
-      if (!symbol || !market || seen.has(symbol)) continue;
-      seen.add(symbol);
-      entries.push([symbol, market]);
+      void this.renderSymbol(symbol);
     }
-    this.socket.setSymbols(entries);
+    this.socket.setSymbols(plan.entries);
   }
 
   private handleTick(tick: TradeTick): void {
     const quote = this.quotes.get(tick.symbol.toUpperCase());
     if (!quote) return;
+    // A late frame from a just-replaced declaration must not make an overflow
+    // key look live again after the planner moved it to REST fallback.
+    if (quote.subscriptionCapped) return;
+    if (quote.market && quote.market !== tick.market) return;
+    if (!isPriceText(tick.price)) return;
+    if (quote.info?.currency && quote.info.currency !== tick.currency) {
+      quote.status = quote.lastPrice ? "stale" : "invalid-symbol";
+      quote.message = CURRENCY_MISMATCH_MESSAGE;
+      void this.renderSymbol(quote.symbol);
+      return;
+    }
+    const tickSessionDate = sessionDateFor(tick.timestamp, tick.market);
+    if (!tickSessionDate || !acceptsPriceUpdate(quote.timestamp, tick.timestamp, "tick")) return;
+
+    const isNewSession = beginQuoteSession(quote, tickSessionDate, tick.price);
+    if (isNewSession) {
+      void this.refreshSymbol(quote.symbol).catch(() => undefined);
+    }
     quote.lastPrice = tick.price;
     quote.timestamp = tick.timestamp;
     quote.status = "ready";
     quote.message = undefined;
+    quote.subscriptionRejected = false;
+    quote.subscriptionCapped = false;
     const priceNum = Number(tick.price);
-    if (Number.isFinite(priceNum)) {
-      if (
-        quote.highPrice !== undefined &&
-        priceNum > Number(quote.highPrice)
-      ) {
-        quote.highPrice = tick.price;
-      }
-      if (quote.lowPrice !== undefined && priceNum < Number(quote.lowPrice)) {
-        quote.lowPrice = tick.price;
-      }
-    }
+    if (Number.isFinite(priceNum)) mergeQuoteHighLow(quote, tick.price, tick.price);
     if (quote.sparkline && quote.sparkline.length > 0) {
       if (Number.isFinite(priceNum)) {
         const updated = [...quote.sparkline];
@@ -641,7 +717,9 @@ export class QuoteRuntime {
     const referencePrice = numberOrUndefined(quote.referencePrice);
     if (lastPrice === undefined || referencePrice === undefined) return;
     const market = quote.market ?? "KR";
-    const timestamp = quote.timestamp || new Date().toISOString();
+    const timestamp = quote.timestamp;
+    const sessionDate = sessionDateFor(timestamp, market);
+    if (!timestamp || !sessionDate || quote.sessionDate !== sessionDate || quote.pendingSessionDate) return;
     const sessionKey = signalSessionKey(
       quote.referencePrice as string,
       timestamp,
@@ -654,8 +732,12 @@ export class QuoteRuntime {
       sessionKey,
       timestamp,
       priceText: quote.lastPrice as string,
-      upperLimit: quote.priceLimit?.upper,
-      lowerLimit: quote.priceLimit?.lower,
+      upperLimit: quote.priceLimit?.date === sessionDate
+        ? quote.priceLimit.upper
+        : undefined,
+      lowerLimit: quote.priceLimit?.date === sessionDate
+        ? quote.priceLimit.lower
+        : undefined,
       movingAverages: quote.movingAverages ?? [],
     };
     const signal = detectSignal(quote.signalMemory, input);
@@ -706,15 +788,35 @@ export class QuoteRuntime {
       priority: immediate ? "immediate" : "normal",
       key,
       render: () => svgToDataUri(renderQuoteCard(view)),
-      commit: (image) => {
-        void binding.action.setImage(image);
-        void this.sendPush({
+      commit: async (image) => {
+        await binding.action.setImage(image);
+        await this.sendPush({
           type: "preview",
           actionId,
           image,
         });
+        await this.sendQuoteStatusIfChanged(actionId, view);
       },
     });
+  }
+
+  /** Trade ticks redraw the key, but PI status travels only on state changes. */
+  private async sendQuoteStatusIfChanged(
+    actionId: string,
+    view: QuoteView,
+  ): Promise<void> {
+    const status = { status: view.status, message: view.message, live: view.live === true };
+    const key = safeSerialize(status);
+    if (this.quoteStatusPushes.get(actionId) === key) return;
+    this.quoteStatusPushes.set(actionId, key);
+    if (!this.piSender) return;
+    try {
+      await this.piSender(actionId, { type: "quote-status", actionId, ...status });
+    } catch {
+      // PI can close between scheduling and committing. Retry after a state
+      // transition rather than retaining a false delivered marker.
+      this.quoteStatusPushes.delete(actionId);
+    }
   }
 
   private viewFor(settings: QuoteActionSettingsV1): QuoteView {
@@ -727,6 +829,10 @@ export class QuoteRuntime {
         status: "auth-required",
         message: "종목 코드를 설정하세요.",
       };
+    const capped = quote?.subscriptionCapped === true;
+    const status = capped
+      ? quote?.lastPrice ? "stale" : "no-data"
+      : quote?.status ?? "connecting";
     return {
       symbol: settings.symbol,
       name: quote?.info?.name ?? settings.name,
@@ -737,16 +843,16 @@ export class QuoteRuntime {
       highPrice: quote?.highPrice,
       lowPrice: quote?.lowPrice,
       timestamp: quote?.timestamp,
-      status: quote?.status ?? "connecting",
-      message: quote?.message,
+      status,
+      message: capped ? SUBSCRIPTION_LIMIT_MESSAGE : quote?.message,
       colorTheme: settings.colorTheme,
       showChart: settings.showChart,
       viewMode: settings.viewMode,
       showCurrencySymbol: settings.showCurrencySymbol,
       sparkline: quote?.sparkline,
       refreshing: quote?.refreshing,
-      live: this.socket.currentState === "connected",
-      signal: quote?.activeSignal?.signal,
+      live: this.socket.currentState === "connected" && !quote?.subscriptionRejected && !capped,
+      signal: capped ? undefined : quote?.activeSignal?.signal,
     };
   }
 

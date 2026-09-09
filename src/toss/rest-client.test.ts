@@ -204,4 +204,69 @@ describe("Toss REST client", () => {
       currency: "USD",
     });
   });
+
+  it("normalizes symbols before building URLs and enforces the candle count range", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        response({ access_token: "token", expires_in: 86400 }),
+      )
+      .mockResolvedValueOnce(
+        response({ result: [{ symbol: "AAPL", timestamp: null, lastPrice: "0", currency: "USD" }] }),
+      );
+    const auth = new AuthSession(
+      {
+        schemaVersion: 1,
+        clientId: "client",
+        clientSecret: "secret",
+        renderMode: "realtime",
+        signalDurationSec: 5,
+      },
+      { fetch },
+    );
+    const client = new TossRestClient(auth, { fetch });
+    await client.getPrices([" aapl "]);
+    expect(String(fetch.mock.calls[1]?.[0])).toContain("symbols=AAPL");
+    await expect(client.getCandles("AAPL", 0)).rejects.toMatchObject({
+      code: "API",
+      retryable: false,
+    });
+    await expect(client.getCandles("AAPL", 201)).rejects.toMatchObject({
+      code: "API",
+      retryable: false,
+    });
+    await expect(client.getPrices(["bad symbol"])).rejects.toMatchObject({
+      code: "INVALID_SYMBOL",
+    });
+  });
+
+  it("does not wait indefinitely for an excessive valid Retry-After value", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        response({ access_token: "token", expires_in: 86400 }),
+      )
+      .mockResolvedValueOnce(
+        new Response("", {
+          status: 429,
+          headers: { "Retry-After": "120" },
+        }),
+      );
+    const auth = new AuthSession(
+      {
+        schemaVersion: 1,
+        clientId: "client",
+        clientSecret: "secret",
+        renderMode: "realtime",
+        signalDurationSec: 5,
+      },
+      { fetch },
+    );
+    const client = new TossRestClient(auth, { fetch });
+    await expect(client.getPrices(["005930"])).rejects.toMatchObject({
+      code: "RATE_LIMITED",
+      retryable: true,
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
 });

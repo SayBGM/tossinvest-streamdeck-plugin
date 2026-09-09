@@ -4,6 +4,15 @@ import { renderQuoteCard, svgToDataUri } from "../../src/renderer/card.js";
 
 const fixtures: ReadonlyArray<{ readonly label: string; readonly view: QuoteView }> = [
   {
+    label: "실시간 구독 한도 초과",
+    view: {
+      symbol: "AAPL", name: "Apple", currency: "USD", status: "stale",
+      lastPrice: "185.70", referencePrice: "180.00", live: false,
+      message: "실시간 구독 한도 100종목 초과 · 시세를 주기적으로 조회합니다.",
+      viewMode: "chart",
+    },
+  },
+  {
     label: "국내 상승 · 차트",
     view: {
       symbol: "005930",

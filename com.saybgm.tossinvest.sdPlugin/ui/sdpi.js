@@ -1,6 +1,7 @@
 /** Minimal Stream Deck Property Inspector transport (KIS Stream Deck architecture). */
 var websocket = null;
-var piUUID = null;
+var pluginUUID = null;
+var actionContext = null;
 var actionInfo = null;
 
 // Called by Stream Deck after the Property Inspector document loads.
@@ -11,7 +12,7 @@ function connectElgatoStreamDeckSocket(
   inInfo,
   inActionInfo,
 ) {
-  piUUID = inPluginUUID;
+  pluginUUID = inPluginUUID;
   try {
     actionInfo =
       typeof inActionInfo === "string"
@@ -20,9 +21,14 @@ function connectElgatoStreamDeckSocket(
   } catch (_) {
     actionInfo = {
       action: "com.saybgm.tossinvest.quote",
+      context: null,
       payload: { settings: {} },
     };
   }
+  actionContext =
+    actionInfo && typeof actionInfo.context === "string"
+      ? actionInfo.context
+      : null;
 
   var wsUrl = "ws://127.0.0.1:" + inPort;
   try {
@@ -36,7 +42,7 @@ function connectElgatoStreamDeckSocket(
       JSON.stringify({ event: inRegisterEvent, uuid: inPluginUUID }),
     );
     websocket.send(
-      JSON.stringify({ event: "getGlobalSettings", context: inPluginUUID }),
+      JSON.stringify({ event: "getGlobalSettings", context: pluginUUID }),
     );
     document.dispatchEvent(
       new CustomEvent("piDidReceiveSettings", {
@@ -80,11 +86,11 @@ function connectElgatoStreamDeckSocket(
 }
 
 function setSettings(settings) {
-  if (!websocket || websocket.readyState !== 1) return;
+  if (!websocket || websocket.readyState !== 1 || !actionContext) return;
   websocket.send(
     JSON.stringify({
       event: "setSettings",
-      context: piUUID,
+      context: actionContext,
       payload: settings,
     }),
   );
@@ -93,7 +99,7 @@ function setSettings(settings) {
 function getGlobalSettings() {
   if (!websocket || websocket.readyState !== 1) return;
   websocket.send(
-    JSON.stringify({ event: "getGlobalSettings", context: piUUID }),
+    JSON.stringify({ event: "getGlobalSettings", context: pluginUUID }),
   );
 }
 
@@ -102,20 +108,20 @@ function setGlobalSettings(settings) {
   websocket.send(
     JSON.stringify({
       event: "setGlobalSettings",
-      context: piUUID,
+      context: pluginUUID,
       payload: settings,
     }),
   );
 }
 
 function sendToPlugin(payload) {
-  if (!websocket || websocket.readyState !== 1 || !actionInfo) return;
+  if (!websocket || websocket.readyState !== 1 || !actionInfo || !actionContext) return;
   websocket.send(
     JSON.stringify({
       action:
         (actionInfo && actionInfo.action) || "com.saybgm.tossinvest.quote",
       event: "sendToPlugin",
-      context: piUUID,
+      context: actionContext,
       payload: payload,
     }),
   );

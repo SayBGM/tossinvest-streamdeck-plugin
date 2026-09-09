@@ -8,15 +8,35 @@ import type {
 import { AuthSession } from "./auth-session.js";
 import { TossError } from "./errors.js";
 import { RateGate } from "./rate-gate.js";
+import {
+  parseCandlesResponse,
+  parsePriceLimitResponse,
+  parsePricesResponse,
+  parseStocksResponse,
+} from "./response-validation.js";
+import { normalizeSymbol } from "../settings.js";
 
-interface ApiEnvelope<T> {
-  result?: T;
-}
 interface ApiErrorEnvelope {
   error?: { requestId?: unknown; code?: unknown; message?: unknown };
 }
-interface CandlePage {
-  candles?: Candle[];
+
+const MAX_AUTOMATIC_RETRY_DELAY_MS = 60_000;
+
+function retryAfterDelayMs(value: string | null): number | undefined {
+  if (value === null) return 1_000;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) {
+    if (seconds < 0) return 1_000;
+    const delay = Math.max(1, seconds * 1_000);
+    return delay <= MAX_AUTOMATIC_RETRY_DELAY_MS ? delay : undefined;
+  }
+  // RFC 7231 also permits an HTTP-date. Treat a stale date as a one-second
+  // fallback, while declining a retry when the server asks us to wait too
+  // long. This prevents malformed or unbounded headers from hanging a key.
+  const retryAt = Date.parse(value);
+  if (!Number.isFinite(retryAt)) return 1_000;
+  const delay = Math.max(1_000, retryAt - Date.now());
+  return delay <= MAX_AUTOMATIC_RETRY_DELAY_MS ? delay : undefined;
 }
 
 export interface TossRestClientOptions {
@@ -41,49 +61,54 @@ export class TossRestClient {
 
   async getStocks(symbols: readonly string[]): Promise<StockInfo[]> {
     if (symbols.length === 0) return [];
+    const normalized = this.normalizeSymbols(symbols);
     return this.stock.run(() =>
-      this.request<StockInfo[]>(
-        `/api/v1/stocks?symbols=${encodeURIComponent(symbols.slice(0, 200).join(","))}`,
+      this.request(
+        `/api/v1/stocks?symbols=${encodeURIComponent(normalized.join(","))}`,
+        (payload) => parseStocksResponse(payload, normalized),
       ),
     );
   }
 
   async getPrices(symbols: readonly string[]): Promise<PriceQuote[]> {
     if (symbols.length === 0) return [];
+    const normalized = this.normalizeSymbols(symbols);
     return this.marketData.run(() =>
-      this.request<PriceQuote[]>(
-        `/api/v1/prices?symbols=${encodeURIComponent(symbols.slice(0, 200).join(","))}`,
+      this.request(
+        `/api/v1/prices?symbols=${encodeURIComponent(normalized.join(","))}`,
+        (payload) => parsePricesResponse(payload, normalized),
       ),
     );
   }
 
   async getCandles(symbol: string, count = 10): Promise<Candle[]> {
+    const normalized = this.normalizeSymbol(symbol);
+    if (!Number.isInteger(count) || count < 1 || count > 200) {
+      throw new TossError("API", "Invalid candle count", false);
+    }
     return this.chart.run(async () => {
-      const result = await this.request<CandlePage>(
-        `/api/v1/candles?symbol=${encodeURIComponent(symbol)}&interval=1d&count=${count}&adjusted=true`,
+      return this.request(
+        `/api/v1/candles?symbol=${encodeURIComponent(normalized)}&interval=1d&count=${count}&adjusted=true`,
+        parseCandlesResponse,
       );
-      return Array.isArray(result.candles) ? result.candles : [];
     });
   }
 
   async getPriceLimit(symbol: string): Promise<PriceLimit> {
+    const normalized = this.normalizeSymbol(symbol);
     return this.marketData.run(async () => {
-      const result = await this.request<PriceLimit>(
-        `/api/v1/price-limits?symbol=${encodeURIComponent(symbol)}`,
+      return this.request(
+        `/api/v1/price-limits?symbol=${encodeURIComponent(normalized)}`,
+        parsePriceLimitResponse,
       );
-      return {
-        timestamp: result.timestamp ?? null,
-        upperLimitPrice: result.upperLimitPrice ?? undefined,
-        lowerLimitPrice: result.lowerLimitPrice ?? undefined,
-        currency: result.currency,
-      };
     });
   }
 
   async resolveSymbol(symbol: string): Promise<StockInfo> {
-    const stocks = await this.getStocks([symbol]);
+    const normalized = this.normalizeSymbol(symbol);
+    const stocks = await this.getStocks([normalized]);
     const match = stocks.find(
-      (stock) => stock.symbol.toUpperCase() === symbol.toUpperCase(),
+      (stock) => stock.symbol.toUpperCase() === normalized,
     );
     if (!match)
       throw new TossError("INVALID_SYMBOL", "Stock was not found", false);
@@ -100,7 +125,11 @@ export class TossRestClient {
     );
   }
 
-  private async request<T>(path: string, retry = true): Promise<T> {
+  private async request<T>(
+    path: string,
+    parseResult: (payload: unknown) => T,
+    retry = true,
+  ): Promise<T> {
     const token = await this.auth.getToken();
     let response: Response;
     try {
@@ -118,7 +147,7 @@ export class TossRestClient {
 
     if (response.status === 401 && retry) {
       this.auth.invalidate();
-      return this.request<T>(path, false);
+      return this.request(path, parseResult, false);
     }
     if (response.status === 403) {
       throw new TossError("IP_NOT_ALLOWED", "IP address is not allowed", false);
@@ -127,12 +156,15 @@ export class TossRestClient {
       throw new TossError("INVALID_SYMBOL", "Stock was not found", false);
     }
     if (response.status === 429) {
-      const retryAfter = Number(response.headers.get("Retry-After") ?? "1");
       if (retry) {
+        const delayMs = retryAfterDelayMs(response.headers.get("Retry-After"));
+        if (delayMs === undefined) {
+          throw new TossError("RATE_LIMITED", "Rate limit exceeded", true);
+        }
         await new Promise((resolve) =>
-          setTimeout(resolve, Math.max(1, retryAfter) * 1_000),
+          setTimeout(resolve, delayMs),
         );
-        return this.request<T>(path, false);
+        return this.request(path, parseResult, false);
       }
       throw new TossError("RATE_LIMITED", "Rate limit exceeded", true);
     }
@@ -158,11 +190,28 @@ export class TossRestClient {
         requestId,
       );
     }
-    const envelope = (await response.json()) as ApiEnvelope<T>;
-    if (envelope.result === undefined) {
-      throw new TossError("API", "API response is missing result", true);
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new TossError("API", "API response is invalid", true);
     }
-    return envelope.result;
+    return parseResult(payload);
+  }
+
+  private normalizeSymbol(value: string): string {
+    const normalized = normalizeSymbol(value);
+    if (!normalized) {
+      throw new TossError("INVALID_SYMBOL", "Invalid symbol", false);
+    }
+    return normalized;
+  }
+
+  private normalizeSymbols(values: readonly string[]): string[] {
+    if (values.length > 200) {
+      throw new TossError("API", "Too many symbols", false);
+    }
+    return values.map((value) => this.normalizeSymbol(value));
   }
 }
 

@@ -127,12 +127,14 @@ async function respond(page: Page, payload: Record<string, unknown>): Promise<vo
 async function initialize(
   page: Page,
   configured: boolean,
+  connectionState = "idle",
 ): Promise<void> {
   const init = await latestCommand(page, "init");
   await respond(page, {
     requestId: init.requestId,
     type: "init",
     isConfigured: configured,
+    connectionState,
     globalSettings: configured
       ? {
           schemaVersion: 1,
@@ -272,20 +274,140 @@ test("잘못된 종목은 기존 확정 설정을 보존하고 성공한 최신 
   });
 });
 
-test("시그널 표시 시간을 바꾸면 저장 커맨드에 반영된다", async ({ page }) => {
+test("표시 설정은 인증 확인 없이 별도 저장 커맨드에 반영된다", async ({ page }) => {
   await openInspector(page);
   await initialize(page, true);
 
-  // Saved credentials collapse the global card, so expand it before editing.
-  await page.locator("#toggleGlobalBtn").click();
   await expect(page.locator("#signalDuration")).toBeVisible();
   await expect(page.locator("#signalDuration")).toHaveValue("5");
 
   await page.locator("#signalDuration").selectOption("10");
-  await page.getByRole("button", { name: "저장 및 연결 확인" }).click();
+  await page.getByRole("button", { name: "표시 설정 저장" }).click();
 
-  const save = await latestCommand(page, "global/save");
-  expect(save).toMatchObject({ signalDurationSec: 10 });
+  const save = await latestCommand(page, "display/save");
+  expect(save).toMatchObject({ signalDurationSec: 10, renderMode: "realtime" });
+  expect((await pluginCommands(page)).filter((command) => command.type === "global/save")).toHaveLength(0);
+});
+
+test("표시 설정 저장 중 양쪽 저장 버튼은 함께 잠기고 응답 후 함께 풀린다", async ({ page }) => {
+  await openInspector(page);
+  await initialize(page, true);
+  await page.locator("#toggleGlobalBtn").click();
+
+  const display = page.getByRole("button", { name: "표시 설정 저장" });
+  const global = page.getByRole("button", { name: "저장 및 연결 확인" });
+  await display.click();
+  const displaySave = await latestCommand(page, "display/save");
+  await expect(global).toBeDisabled();
+  await expect(display).toBeDisabled();
+  await respond(page, {
+    requestId: displaySave.requestId,
+    ok: true,
+    settings: { schemaVersion: 1, clientId: "client-12345678", clientSecret: "••••••••", renderMode: "realtime", signalDurationSec: 5 },
+    isConfigured: true,
+  });
+  await expect(global).toBeEnabled();
+  await expect(display).toBeEnabled();
+});
+
+test("표시 설정 저장 실패 시 양쪽 저장 버튼을 다시 사용할 수 있다", async ({ page }) => {
+  await openInspector(page);
+  await initialize(page, true);
+  await page.locator("#toggleGlobalBtn").click();
+
+  const display = page.getByRole("button", { name: "표시 설정 저장" });
+  const global = page.getByRole("button", { name: "저장 및 연결 확인" });
+  await display.click();
+  const displaySave = await latestCommand(page, "display/save");
+  await expect(global).toBeDisabled();
+  await expect(display).toBeDisabled();
+
+  await respond(page, {
+    requestId: displaySave.requestId,
+    ok: false,
+    message: "표시 설정을 저장할 수 없습니다.",
+  });
+
+  await expect(page.locator("#displayStatus")).toContainText("저장할 수 없습니다");
+  await expect(global).toBeEnabled();
+  await expect(display).toBeEnabled();
+});
+
+test("표시 설정 저장 시간 초과 시 20초를 기다리지 않고 양쪽 저장 버튼을 푼다", async ({ page }) => {
+  await openInspector(page);
+  await initialize(page, true);
+  await page.locator("#toggleGlobalBtn").click();
+  await page.clock.install();
+
+  const display = page.getByRole("button", { name: "표시 설정 저장" });
+  const global = page.getByRole("button", { name: "저장 및 연결 확인" });
+  await display.click();
+  await latestCommand(page, "display/save");
+  await expect(global).toBeDisabled();
+  await expect(display).toBeDisabled();
+
+  await page.clock.fastForward(20_000);
+
+  await expect(page.locator("#displayStatus")).toContainText("시간이 초과되었습니다");
+  await expect(global).toBeEnabled();
+  await expect(display).toBeEnabled();
+});
+
+test("종목 확인과 시세 연결 상태를 별도로 표시하고 raw 오류를 노출하지 않는다", async ({ page }) => {
+  await openInspector(page, {
+    schemaVersion: 1,
+    symbol: "AAPL",
+    name: "Apple",
+    market: "US",
+    currency: "USD",
+  });
+  await initialize(page, true, "connected");
+
+  await page.locator("#toggleGlobalBtn").click();
+  await page.getByLabel("Client Secret").fill("draft-secret");
+  await respond(page, {
+    type: "global-settings",
+    settings: {
+      schemaVersion: 1,
+      clientId: "client-12345678",
+      clientSecret: "••••••••",
+      renderMode: "realtime",
+      signalDurationSec: 5,
+    },
+  });
+  await expect(page.getByLabel("Client Secret")).toHaveValue("draft-secret");
+
+  await page.getByLabel("종목 코드 / 티커").fill("TSLA");
+  await expect(page.locator("#resolved")).toContainText("종목 확인됨");
+  await expect(page.locator("#resolved")).toContainText("시세 서버 연결됨");
+  await respond(page, {
+    type: "connection",
+    state: "backoff",
+    detail: "websocket:403:secret-internal-detail",
+  });
+  await expect(page.locator("#resolved")).toContainText("시세 연결 재시도 중");
+  await expect(page.locator("#resolved")).not.toContainText("secret-internal-detail");
+  await respond(page, { type: "connection", state: "connected" });
+  await expect(page.locator("#resolved")).toContainText("시세 서버 연결됨");
+  await expect(page.getByLabel("종목 코드 / 티커")).toHaveValue("TSLA");
+});
+
+test("종목별 구독 한도 안내는 다른 키 응답을 무시하고 정상 복구 시 사라진다", async ({ page }) => {
+  await openInspector(page, {
+    schemaVersion: 1, symbol: "AAPL", name: "Apple", market: "US", currency: "USD",
+  });
+  await initialize(page, true, "connected");
+  const message = "실시간 구독 한도 100종목을 초과했습니다. REST 시세를 표시합니다. 다른 종목 키를 제거하면 자동으로 복구됩니다.";
+  await respond(page, {
+    type: "init", connectionState: "connected", quoteStatus: { status: "stale", live: false, message },
+  });
+  await expect(page.locator("#quoteStatus")).toHaveText(message);
+  await page.getByLabel("종목 코드 / 티커").fill("NVDA");
+  await respond(page, { type: "quote-status", actionId: "another-key", status: "ready" });
+  await expect(page.locator("#quoteStatus")).toHaveText(message);
+  await respond(page, { type: "quote-status", actionId: "key-context", status: "ready", live: true });
+  await expect(page.locator("#quoteStatus")).toBeHidden();
+  await expect(page.getByLabel("종목 코드 / 티커")).toHaveValue("NVDA");
 });
 
 test("화면 모드 탭은 선택 상태와 자동 저장을 동기화한다", async ({ page }) => {

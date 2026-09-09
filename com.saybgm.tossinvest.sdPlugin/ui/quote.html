@@ -54,28 +54,7 @@
               spellcheck="false"
           /></label>
           <p class="hint">
-            자격증명은 로컬 Stream Deck 설정에만 안전하게 저장됩니다.
-          </p>
-
-          <label
-            >화면 갱신 주기
-            <select id="renderMode">
-              <option value="realtime">실시간 (전체 키 합산 최대 10회/초)</option>
-              <option value="economy">절약형 (1초)</option>
-            </select>
-          </label>
-
-          <label
-            >시그널 표시 시간
-            <select id="signalDuration">
-              <option value="3">3초</option>
-              <option value="5">5초</option>
-              <option value="10">10초</option>
-            </select>
-          </label>
-          <p class="hint">
-            등락률·상하한가·이평선 시그널이 발생하면 키가 잠시 시그널 화면으로
-            바뀝니다. 키를 누르면 바로 닫힙니다.
+            이 컴퓨터의 Stream Deck 설정에 저장됩니다. OS 보안 저장소는 사용하지 않습니다.
           </p>
 
           <div class="buttons">
@@ -158,14 +137,15 @@
         </label>
 
         <div id="resolved" class="resolved" hidden></div>
+        <output id="quoteStatus" class="quote-status-note" aria-live="polite" hidden></output>
 
         <!-- 옵션: 색상 테마 및 키 동작 -->
         <div class="option-grid">
           <label
             >색상 테마
             <select id="colorTheme">
-              <option value="kr">한국형 (빨강 상승 / 파랑 하락)</option>
-              <option value="global">글로벌 (초록 상승 / 빨강 하락)</option>
+              <option value="kr">한국형 (빨강/파랑)</option>
+              <option value="global">글로벌 (초록/빨강)</option>
             </select>
           </label>
 
@@ -173,8 +153,8 @@
             >키 누르기 동작
             <select id="keyBehavior">
               <option value="refresh">즉시 새로고침</option>
-              <option value="toggle-view">화면 모드 전환 (차트 ↔ 상세)</option>
-              <option value="open">토스증권 웹에서 종목 열기</option>
+              <option value="toggle-view">화면 전환 (차트 ↔ 상세)</option>
+              <option value="open">토스증권에서 열기</option>
               <option value="none">동작 없음</option>
             </select>
           </label>
@@ -258,6 +238,36 @@
         </div>
 
         <output id="actionStatus" aria-live="polite"></output>
+      </section>
+
+      <section class="card display-card" id="displaySection">
+        <div class="header-row">
+          <h2>표시 설정</h2>
+          <span class="badge">인증과 별도</span>
+        </div>
+        <p class="notice">시세 키의 갱신 주기와 시그널 표시 시간을 정합니다.</p>
+        <div class="display-grid">
+          <label
+            >갱신 주기
+            <select id="renderMode">
+              <option value="realtime">실시간 (최대 10회/초)</option>
+              <option value="economy">절약형 (1초)</option>
+            </select>
+          </label>
+          <label
+            >시그널 표시
+            <select id="signalDuration">
+              <option value="3">3초</option>
+              <option value="5">5초</option>
+              <option value="10">10초</option>
+            </select>
+          </label>
+        </div>
+        <p class="hint">등락률·상하한가·이평선 시그널이 발생하면 잠시 시그널 화면으로 바뀝니다.</p>
+        <div class="buttons">
+          <button id="saveDisplay" class="secondary">표시 설정 저장</button>
+        </div>
+        <output id="displayStatus" aria-live="polite"></output>
       </section>
     </main>
     <script src="sdpi.js"></script>

@@ -8,7 +8,10 @@
     draftSymbol: "",
     resolveRequestId: null,
     globalSaveRequestId: null,
+    displaySaveRequestId: null,
     previewRequestId: null,
+    connectionState: "idle",
+    globalDraftDirty: false,
   };
   var pendingRequests = {};
 
@@ -32,11 +35,21 @@
     var ids =
       scope === "global"
         ? ["saveGlobal", "testGlobal"]
+        : scope === "display"
+          ? ["saveDisplay"]
         : ["resolve", "symbol"];
-    ids.forEach(function (id) {
-      var el = $(id);
-      if (el) el.disabled = busy;
-    });
+    if (scope === "global" || scope === "display") {
+      var saveBusy = Boolean(state.globalSaveRequestId || state.displaySaveRequestId);
+      ["saveGlobal", "saveDisplay"].forEach(function (id) {
+        var el = $(id);
+        if (el) el.disabled = saveBusy;
+      });
+    } else {
+      ids.forEach(function (id) {
+        var el = $(id);
+        if (el) el.disabled = busy;
+      });
+    }
     if (scope === "resolve") {
       document.querySelectorAll(".chip").forEach(function (chip) {
         chip.disabled = busy;
@@ -75,6 +88,12 @@
             "인증 확인 시간이 초과되었습니다. WTS IP 허용과 네트워크를 확인하세요.",
             true,
           );
+        } else if (type === "display/save") {
+          if (state.displaySaveRequestId === reqId) {
+            state.displaySaveRequestId = null;
+            setBusy("display", false);
+          }
+          setStatus("displayStatus", "표시 설정 저장 시간이 초과되었습니다.", true);
         } else if (type === "symbol/resolve") {
           if (state.resolveRequestId !== reqId) return;
           state.resolveRequestId = null;
@@ -85,7 +104,7 @@
             true,
           );
         }
-      }, type === "global/save" ? 20_000 : 12_000),
+      }, type === "global/save" || type === "display/save" ? 20_000 : 12_000),
     };
 
     return reqId;
@@ -138,7 +157,7 @@
     });
   };
 
-  var renderGlobal = function (settings, isConfigured) {
+  var renderGlobal = function (settings, isConfigured, options) {
     settings = settings || state.globalSettings || {};
     state.globalSettings = settings;
 
@@ -148,14 +167,15 @@
       state.isConfigured = true;
     }
 
-    if (settings.clientId) {
+    var preserveCredentialDraft = options && options.preserveCredentialDraft;
+    if (settings.clientId && !preserveCredentialDraft) {
       $("clientId").value = settings.clientId;
     }
 
     var secretInput = $("clientSecret");
-    if (settings.clientSecret && settings.clientSecret !== "••••••••") {
+    if (!preserveCredentialDraft && settings.clientSecret && settings.clientSecret !== "••••••••") {
       secretInput.value = settings.clientSecret;
-    } else if (state.isConfigured || settings.clientSecret === "••••••••") {
+    } else if (!preserveCredentialDraft && (state.isConfigured || settings.clientSecret === "••••••••")) {
       secretInput.value = "";
       secretInput.placeholder = "•••••••• (저장됨 - 변경 시에만 입력)";
     } else {
@@ -232,6 +252,9 @@
 
   var renderAction = function (settings) {
     settings = settings || state.actionSettings || {};
+    if (settings.symbol !== state.actionSettings.symbol) {
+      renderQuoteStatus({});
+    }
     state.actionSettings = settings;
 
     var sym = settings.symbol || "";
@@ -253,6 +276,7 @@
       var badgeClass = isKr ? "badge-kr" : "badge-us";
       var marketText = isKr ? "KR" : "US";
       var currencyText = settings.currency || (isKr ? "KRW" : "USD");
+      var connection = connectionStatus(state.connectionState);
       resolved.innerHTML =
         "<div class='resolved-card'>" +
         "<div class='resolved-main'>" +
@@ -272,11 +296,44 @@
         escapeHtml(currencyText) +
         "</div>" +
         "</div>" +
-        "<div class='resolved-status'>✓ 연결됨</div>" +
+        "<div class='resolved-status-group'>" +
+        "<div class='resolved-status resolved-status-confirmed'>✓ 종목 확인됨</div>" +
+        "<div class='resolved-status resolved-status-connection " + connection.className + "'>" +
+        connection.label +
+        "</div>" +
+        "</div>" +
         "</div>";
     } else {
       resolved.hidden = true;
     }
+  };
+
+  var renderQuoteStatus = function (status) {
+    var output = $("quoteStatus");
+    if (!output) return;
+    var message = status && typeof status.message === "string" ? status.message : "";
+    output.textContent = message;
+    output.hidden = !message;
+  };
+
+  var updateResolvedConnectionStatus = function () {
+    var status = document.querySelector(".resolved-status-connection");
+    if (!status) return;
+    var connection = connectionStatus(state.connectionState);
+    status.textContent = connection.label;
+    status.className =
+      "resolved-status resolved-status-connection " + connection.className;
+  };
+
+  var connectionStatus = function (stateName) {
+    var statuses = {
+      idle: { label: "시세 연결 대기 중", className: "status-idle" },
+      connecting: { label: "시세 연결 중…", className: "status-connecting" },
+      connected: { label: "시세 서버 연결됨", className: "status-connected" },
+      backoff: { label: "시세 연결 재시도 중…", className: "status-backoff" },
+      stopped: { label: "시세 연결 중지됨", className: "status-stopped" },
+    };
+    return statuses[stateName] || statuses.idle;
   };
 
   var escapeHtml = function (str) {
@@ -349,7 +406,9 @@
   document.addEventListener("piDidReceiveGlobalSettings", function (e) {
     var settings = e.detail || {};
     var configured = Boolean(settings.clientId && settings.clientSecret);
-    renderGlobal(settings, configured);
+    renderGlobal(settings, configured, {
+      preserveCredentialDraft: state.globalDraftDirty,
+    });
     updateStepVisibility(configured);
     if (configured) {
       setStatus("globalStatus", "저장된 자격증명을 확인했습니다.");
@@ -385,6 +444,11 @@
     }
 
     if (payload.type === "init") {
+      if (payload.quoteStatus) renderQuoteStatus(payload.quoteStatus);
+      if (typeof payload.connectionState === "string") {
+        state.connectionState = payload.connectionState;
+        updateResolvedConnectionStatus();
+      }
       if (payload.globalSettings) {
         renderGlobal(payload.globalSettings, payload.isConfigured);
       }
@@ -392,6 +456,14 @@
       if (payload.isConfigured) {
         setStatus("globalStatus", "저장된 자격증명을 확인했습니다.");
       }
+    } else if (payload.type === "quote-status") {
+      renderQuoteStatus(payload);
+    } else if (payload.type === "global-settings" && payload.settings) {
+      renderGlobal(payload.settings, payload.isConfigured, { preserveCredentialDraft: true });
+      updateStepVisibility(payload.isConfigured);
+    } else if (payload.type === "connection") {
+      state.connectionState = typeof payload.state === "string" ? payload.state : "idle";
+      updateResolvedConnectionStatus();
     } else if (payload.type === "settings-updated" && payload.settings) {
       renderAction(payload.settings);
       requestPreview();
@@ -426,18 +498,24 @@
         "종목을 확인했습니다: " +
           (payload.settings.name || payload.settings.symbol),
       );
-    } else if (payload.ok && payload.settings) {
+    } else if (payload.ok && payload.settings && requestType === "global/save") {
       if (requestType !== "global/save") return;
       if (requestType === "global/save") {
         state.globalSaveRequestId = null;
         setBusy("global", false);
       }
       renderGlobal(payload.settings, payload.isConfigured);
+      state.globalDraftDirty = false;
       updateStepVisibility(
         payload.isConfigured !== undefined ? payload.isConfigured : true,
       );
       setStatus("globalStatus", payload.message || "전역 설정을 저장했습니다.");
       requestPreview();
+    } else if (payload.ok && requestType === "display/save") {
+      state.displaySaveRequestId = null;
+      setBusy("display", false);
+      if (payload.settings) renderGlobal(payload.settings, payload.isConfigured, { preserveCredentialDraft: true });
+      setStatus("displayStatus", payload.message || "표시 설정을 저장했습니다.");
     } else if (payload.ok) {
       if (requestType === "global/test") {
         setStatus("globalStatus", payload.message || "인증에 성공했습니다.");
@@ -457,6 +535,10 @@
         state.resolveRequestId = null;
         setBusy("resolve", false);
         setStatus("actionStatus", payload.message, true);
+      } else if (requestType === "display/save") {
+        state.displaySaveRequestId = null;
+        setBusy("display", false);
+        setStatus("displayStatus", payload.message, true);
       }
     }
   });
@@ -488,6 +570,17 @@
     setStatus("globalStatus", "인증 확인 중…");
   });
 
+  $("saveDisplay").addEventListener("click", function () {
+    if (state.displaySaveRequestId) return;
+    var reqId = sendCommand("display/save", {
+      renderMode: $("renderMode").value,
+      signalDurationSec: Number($("signalDuration").value),
+    });
+    state.displaySaveRequestId = reqId;
+    setBusy("display", true);
+    setStatus("displayStatus", "표시 설정 저장 중…");
+  });
+
   // Keep the legacy command compatible when an older inspector injects the
   // control, while current markup exposes only the validate-and-save CTA.
   if ($("testGlobal")) {
@@ -512,6 +605,13 @@
   $("symbol").addEventListener("input", function () {
     state.draftSymbol = $("symbol").value;
     if (!state.resolveRequestId) setStatus("actionStatus", "");
+  });
+
+  $("clientId").addEventListener("input", function () {
+    state.globalDraftDirty = true;
+  });
+  $("clientSecret").addEventListener("input", function () {
+    state.globalDraftDirty = true;
   });
 
   document.querySelectorAll(".chip").forEach(function (chip) {

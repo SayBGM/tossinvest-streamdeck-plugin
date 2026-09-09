@@ -8,6 +8,8 @@ export interface GlobalSettingsInput {
   readonly signalDurationSec?: unknown;
 }
 
+export type DisplaySettingsInput = Pick<GlobalSettingsInput, "renderMode" | "signalDurationSec">;
+
 export interface GlobalSettingsRuntime {
   readonly settings: GlobalSettingsV1;
   updateGlobalSettings(settings: GlobalSettingsV1): Promise<void>;
@@ -55,5 +57,21 @@ export async function saveValidatedGlobalSettings(
   await options.validate(candidate);
   await options.persist(candidate);
   await (options.apply?.(candidate) ?? runtime.updateGlobalSettings(candidate));
+  return runtime.publicGlobalSettings();
+}
+
+/** Display preferences do not change credentials and need no OAuth request. */
+export async function saveDisplaySettings(
+  runtime: GlobalSettingsRuntime,
+  input: DisplaySettingsInput,
+  persist: (settings: GlobalSettingsV1) => Promise<void>,
+): Promise<GlobalSettingsV1> {
+  const candidate = migrateGlobalSettings({
+    ...runtime.settings,
+    renderMode: input.renderMode ?? runtime.settings.renderMode,
+    signalDurationSec: input.signalDurationSec ?? runtime.settings.signalDurationSec,
+  });
+  await persist(candidate);
+  await runtime.updateGlobalSettings(candidate);
   return runtime.publicGlobalSettings();
 }

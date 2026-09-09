@@ -194,7 +194,15 @@ describe("QuoteRuntime", () => {
 
   it("alerts when a manual refresh cannot run without credentials", async () => {
     let alerts = 0;
-    const runtime = createRuntime();
+    const runtime = createRuntime({
+      settings: {
+        schemaVersion: 1,
+        clientId: "c",
+        clientSecret: "s",
+        renderMode: "realtime",
+        signalDurationSec: 5,
+      },
+    });
     const action = {
       id: "key-refresh-error",
       setImage: async () => undefined,
@@ -507,9 +515,9 @@ describe("QuoteRuntime", () => {
       },
       { timeout: 2000 },
     );
-    // Give the sibling key's render (submitted alongside Samsung's from the
-    // same refreshAll pass) time to settle too.
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    // The first REST price is intentionally rendered before daily-history
+    // enrichment; let both queued passes settle before measuring the tick.
+    await new Promise((resolve) => setTimeout(resolve, 450));
 
     const samsungCountBeforeTick = samsungImages.length;
     const hynixCountBeforeTick = hynixImageCount;
@@ -550,6 +558,269 @@ describe("QuoteRuntime", () => {
     );
     expect(decodedPreview).toContain("76,000");
 
+    await runtime.destroy();
+  });
+
+  it("drops out-of-order ticks and clears prior-session signal context", async () => {
+    const runtime = createRuntime();
+    const quotes = (runtime as unknown as {
+      quotes: Map<string, Record<string, unknown>>;
+    }).quotes;
+    quotes.set("005930", {
+      symbol: "005930",
+      market: "KR",
+      lastPrice: "100",
+      timestamp: "2026-09-07T01:00:00Z",
+      status: "ready",
+      referencePrice: "90",
+      highPrice: "110",
+      lowPrice: "80",
+      sparkline: [90, 100],
+      priceLimit: { upper: 120, lower: 60, date: "2026-09-07" },
+      movingAverages: [{ period: 20, value: 95 }],
+      sessionDate: "2026-09-07",
+      signalMemory: {},
+    });
+
+    const handleTick = (runtime as unknown as {
+      handleTick(tick: unknown): void;
+    }).handleTick.bind(runtime);
+    handleTick({
+      symbol: "005930",
+      market: "KR",
+      price: "105",
+      timestamp: "2026-09-07T01:05:00Z",
+      currency: "KRW",
+    });
+    handleTick({
+      symbol: "005930",
+      market: "KR",
+      price: "99",
+      timestamp: "2026-09-07T01:04:00Z",
+      currency: "KRW",
+    });
+    expect(quotes.get("005930")?.lastPrice).toBe("105");
+
+    handleTick({
+      symbol: "005930",
+      market: "KR",
+      price: "115",
+      timestamp: "2026-09-08T01:00:00Z",
+      currency: "KRW",
+    });
+    const nextSession = quotes.get("005930");
+    expect(nextSession).toMatchObject({
+      lastPrice: "115",
+      referencePrice: undefined,
+      priceLimit: undefined,
+      movingAverages: undefined,
+      pendingSessionDate: "2026-09-08",
+    });
+    await runtime.destroy();
+  });
+
+  it("keeps a newer live tick when an older REST snapshot finishes later", async () => {
+    let resolveStocks: ((value: unknown[]) => void) | undefined;
+    let resolvePrices: ((value: unknown[]) => void) | undefined;
+    const runtime = createRuntime({
+      settings: {
+        schemaVersion: 1,
+        clientId: "c",
+        clientSecret: "s",
+        renderMode: "realtime",
+        signalDurationSec: 5,
+      },
+    });
+    const rest = (runtime as unknown as {
+      rest: {
+        getStocks: (symbols: readonly string[]) => Promise<unknown[]>;
+        getPrices: (symbols: readonly string[]) => Promise<unknown[]>;
+        getCandles: (symbol: string, count: number) => Promise<unknown[]>;
+      };
+    }).rest;
+    rest.getStocks = () => new Promise((resolve) => { resolveStocks = resolve; });
+    rest.getPrices = () => new Promise((resolve) => { resolvePrices = resolve; });
+    rest.getCandles = async () => [];
+
+    const quotes = (runtime as unknown as {
+      quotes: Map<string, Record<string, unknown>>;
+    }).quotes;
+    quotes.set("005930", {
+      symbol: "005930",
+      market: "KR",
+      lastPrice: "100",
+      timestamp: "2026-09-07T01:00:00Z",
+      sessionDate: "2026-09-07",
+      status: "ready",
+      signalMemory: {},
+    });
+    const refresh = (runtime as unknown as {
+      performRefresh(symbols: readonly string[]): Promise<void>;
+    }).performRefresh(["005930"]);
+
+    (runtime as unknown as { handleTick(tick: unknown): void }).handleTick({
+      symbol: "005930",
+      market: "KR",
+      price: "105",
+      timestamp: "2026-09-07T01:05:00Z",
+      currency: "KRW",
+    });
+    resolveStocks?.([{ symbol: "005930", name: "삼성전자", market: "KR", currency: "KRW" }]);
+    resolvePrices?.([{ symbol: "005930", lastPrice: "101", timestamp: "2026-09-07T01:01:00Z", currency: "KRW" }]);
+    await refresh;
+
+    expect(quotes.get("005930")).toMatchObject({
+      lastPrice: "105",
+      timestamp: "2026-09-07T01:05:00Z",
+    });
+    await runtime.destroy();
+  });
+
+  it("restores a connecting quote from an equal REST timestamp without replacing its live price", async () => {
+    const runtime = createRuntime({
+      settings: {
+        schemaVersion: 1,
+        clientId: "c",
+        clientSecret: "s",
+        renderMode: "realtime",
+        signalDurationSec: 5,
+      },
+    });
+    const rest = (runtime as unknown as {
+      rest: {
+        getStocks: () => Promise<unknown[]>;
+        getPrices: () => Promise<unknown[]>;
+        getCandles: () => Promise<unknown[]>;
+        getPriceLimit: () => Promise<unknown>;
+      };
+    }).rest;
+    rest.getStocks = async () => [
+      { symbol: "005930", name: "삼성전자", market: "KR", currency: "KRW" },
+    ];
+    rest.getPrices = async () => [
+      { symbol: "005930", lastPrice: "101", timestamp: "2026-09-07T01:05:00Z", currency: "KRW" },
+    ];
+    rest.getCandles = async () => [];
+    rest.getPriceLimit = async () => ({});
+    const quotes = (runtime as unknown as {
+      quotes: Map<string, Record<string, unknown>>;
+    }).quotes;
+    quotes.set("005930", {
+      symbol: "005930",
+      market: "KR",
+      lastPrice: "105",
+      timestamp: "2026-09-07T01:05:00Z",
+      sessionDate: "2026-09-07",
+      status: "connecting",
+      signalMemory: {},
+    });
+
+    await (runtime as unknown as {
+      performRefresh(symbols: readonly string[]): Promise<void>;
+    }).performRefresh(["005930"]);
+
+    expect(quotes.get("005930")).toMatchObject({
+      lastPrice: "105",
+      timestamp: "2026-09-07T01:05:00Z",
+      status: "ready",
+    });
+    await runtime.destroy();
+  });
+
+  it("keeps session-tick highs and lows while candle history is pending", async () => {
+    const runtime = createRuntime();
+    const quotes = (runtime as unknown as {
+      quotes: Map<string, Record<string, unknown>>;
+    }).quotes;
+    quotes.set("005930", {
+      symbol: "005930",
+      market: "KR",
+      lastPrice: "100",
+      timestamp: "2026-09-07T01:00:00Z",
+      sessionDate: "2026-09-07",
+      status: "ready",
+      referencePrice: "90",
+      highPrice: "110",
+      lowPrice: "80",
+      signalMemory: {},
+    });
+    const handleTick = (runtime as unknown as {
+      handleTick(tick: unknown): void;
+    }).handleTick.bind(runtime);
+
+    handleTick({ symbol: "005930", market: "KR", price: "115", timestamp: "2026-09-08T01:00:00Z", currency: "KRW" });
+    handleTick({ symbol: "005930", market: "KR", price: "108", timestamp: "2026-09-08T01:01:00Z", currency: "KRW" });
+    handleTick({ symbol: "005930", market: "KR", price: "120", timestamp: "2026-09-08T01:02:00Z", currency: "KRW" });
+
+    expect(quotes.get("005930")).toMatchObject({
+      pendingSessionDate: "2026-09-08",
+      highPrice: "120",
+      lowPrice: "108",
+    });
+    await runtime.destroy();
+  });
+
+  it("does not let an older-session candle overwrite new-session tick extremes", async () => {
+    let resolveCandles: ((value: unknown[]) => void) | undefined;
+    const runtime = createRuntime({
+      settings: {
+        schemaVersion: 1,
+        clientId: "c",
+        clientSecret: "s",
+        renderMode: "realtime",
+        signalDurationSec: 5,
+      },
+    });
+    const rest = (runtime as unknown as {
+      rest: {
+        getStocks: () => Promise<unknown[]>;
+        getPrices: () => Promise<unknown[]>;
+        getCandles: () => Promise<unknown[]>;
+        getPriceLimit: () => Promise<unknown>;
+      };
+    }).rest;
+    rest.getStocks = async () => [
+      { symbol: "005930", name: "삼성전자", market: "KR", currency: "KRW" },
+    ];
+    rest.getPrices = async () => [
+      { symbol: "005930", lastPrice: "105", timestamp: "2026-09-08T01:00:00Z", currency: "KRW" },
+    ];
+    rest.getCandles = () => new Promise((resolve) => { resolveCandles = resolve; });
+    rest.getPriceLimit = async () => ({});
+    const quotes = (runtime as unknown as {
+      quotes: Map<string, Record<string, unknown>>;
+    }).quotes;
+    quotes.set("005930", {
+      symbol: "005930",
+      market: "KR",
+      lastPrice: "100",
+      timestamp: "2026-09-07T01:00:00Z",
+      sessionDate: "2026-09-07",
+      status: "ready",
+      referencePrice: "90",
+      highPrice: "110",
+      lowPrice: "80",
+      signalMemory: {},
+    });
+    const refresh = (runtime as unknown as {
+      performRefresh(symbols: readonly string[]): Promise<void>;
+    }).performRefresh(["005930"]);
+    await vi.waitFor(() => expect(resolveCandles).toBeTypeOf("function"));
+
+    const handleTick = (runtime as unknown as {
+      handleTick(tick: unknown): void;
+    }).handleTick.bind(runtime);
+    handleTick({ symbol: "005930", market: "KR", price: "120", timestamp: "2026-09-08T01:01:00Z", currency: "KRW" });
+    handleTick({ symbol: "005930", market: "KR", price: "108", timestamp: "2026-09-08T01:02:00Z", currency: "KRW" });
+    resolveCandles?.([
+      { timestamp: "2026-09-07T00:00:00Z", closePrice: "100", highPrice: "999", lowPrice: "1" },
+    ]);
+    await refresh;
+
+    expect(quotes.get("005930")).toMatchObject({
+      highPrice: "120",
+      lowPrice: "105",
+    });
     await runtime.destroy();
   });
 
@@ -857,6 +1128,177 @@ describe("QuoteRuntime", () => {
     expect(decoded).not.toContain("상승");
     expect(decoded).not.toContain("하락");
 
+    await runtime.destroy();
+  });
+
+  it("keeps the cached quote visible and explains the REST fallback past 100 unique symbols", async () => {
+    const runtime = createRuntime({
+      settings: {
+        schemaVersion: 1,
+        clientId: "c",
+        clientSecret: "s",
+        renderMode: "realtime",
+        signalDurationSec: 5,
+      },
+    });
+    (runtime.socket as unknown as { state: string }).state = "connected";
+    const internals = runtime as unknown as {
+      bindings: Map<string, {
+        action: { id: string; setImage(image: string): Promise<void> };
+        generation: number;
+        settings: Record<string, unknown>;
+      }>;
+      quotes: Map<string, Record<string, unknown>>;
+      reconcileSubscriptions(): void;
+      performRefresh(): Promise<void>;
+    };
+    const setSymbols = vi.spyOn(runtime.socket, "setSymbols").mockImplementation(() => undefined);
+    let refreshSecond = 0;
+    vi.spyOn(runtime.rest, "getStocks").mockImplementation(async (symbols) =>
+      symbols.map((symbol) => ({ symbol, name: symbol, market: "US", currency: "USD" })),
+    );
+    vi.spyOn(runtime.rest, "getPrices").mockImplementation(async (symbols) => {
+      refreshSecond += 1;
+      return symbols.map((symbol) => ({
+        symbol,
+        lastPrice: "181.00",
+        currency: "USD",
+        timestamp: `2026-09-07T01:00:${String(refreshSecond).padStart(2, "0")}Z`,
+      }));
+    });
+    vi.spyOn(runtime.rest, "getCandles").mockResolvedValue([]);
+
+    for (let index = 0; index <= 100; index += 1) {
+      const symbol = `T${String(index).padStart(3, "0")}`;
+      internals.bindings.set(`key-${index}`, {
+        action: { id: `key-${index}`, setImage: async () => undefined },
+        generation: 1,
+        settings: {
+          schemaVersion: 1,
+          symbol,
+          name: symbol,
+          market: "US",
+          currency: "USD",
+          keyBehavior: "refresh",
+        },
+      });
+      internals.quotes.set(symbol, {
+        symbol,
+        info: { symbol, name: symbol, market: "US", currency: "USD" },
+        market: "US",
+        lastPrice: "180.50",
+        referencePrice: "175.00",
+        status: "ready",
+        signalMemory: {},
+      });
+    }
+    // A second key for the first symbol does not consume another socket slot.
+    internals.bindings.set("key-duplicate", {
+      action: { id: "key-duplicate", setImage: async () => undefined },
+      generation: 1,
+      settings: {
+        schemaVersion: 1,
+        symbol: "T000",
+        name: "T000",
+        market: "US",
+        currency: "USD",
+        keyBehavior: "refresh",
+      },
+    });
+
+    await internals.performRefresh();
+    const firstPlan = setSymbols.mock.calls.at(-1)?.[0] ?? [];
+    expect(firstPlan).toHaveLength(100);
+    expect(firstPlan.map(([symbol]) => symbol)).not.toContain("T100");
+    expect(runtime.quoteStatus("key-100")).toEqual({
+      status: "stale",
+      message: "실시간 구독 한도 100종목 초과 · 시세를 주기적으로 조회합니다. 다른 종목 키를 제거하면 자동 복구됩니다.",
+      live: false,
+    });
+    // A later REST timestamp must not clear the cap warning or mark this key
+    // live while the same 100 earlier symbols still occupy all slots.
+    await internals.performRefresh();
+    expect(runtime.quoteStatus("key-100")).toEqual({
+      status: "stale",
+      message: "실시간 구독 한도 100종목 초과 · 시세를 주기적으로 조회합니다. 다른 종목 키를 제거하면 자동 복구됩니다.",
+      live: false,
+    });
+    // Removing the only two keys for T000 frees a slot for the prior overflow.
+    runtime.disappear("key-0");
+    runtime.disappear("key-duplicate");
+    const restoredPlan = setSymbols.mock.calls.at(-1)?.[0] ?? [];
+    expect(restoredPlan).toHaveLength(100);
+    expect(restoredPlan.map(([symbol]) => symbol)).toContain("T100");
+    expect(runtime.quoteStatus("key-100")).toEqual({
+      status: "ready",
+      message: undefined,
+      live: true,
+    });
+
+    await runtime.destroy();
+  });
+
+  it("does not accept a tick whose currency differs from validated metadata", async () => {
+    const runtime = createRuntime();
+    const quotes = (runtime as unknown as {
+      quotes: Map<string, Record<string, unknown>>;
+      handleTick(tick: unknown): void;
+    }).quotes;
+    quotes.set("AAPL", {
+      symbol: "AAPL",
+      info: { symbol: "AAPL", name: "Apple", market: "US", currency: "USD" },
+      market: "US",
+      lastPrice: "180.50",
+      timestamp: "2026-09-07T01:00:00Z",
+      status: "ready",
+      signalMemory: {},
+    });
+
+    (runtime as unknown as { handleTick(tick: unknown): void }).handleTick({
+      symbol: "AAPL",
+      market: "US",
+      price: "99999",
+      timestamp: "2026-09-07T01:01:00Z",
+      currency: "KRW",
+    });
+
+    expect(quotes.get("AAPL")).toMatchObject({
+      lastPrice: "180.50",
+      status: "stale",
+      message: "시세 통화 정보가 종목 정보와 일치하지 않습니다.",
+    });
+    await runtime.destroy();
+  });
+
+  it("does not let a malformed WebSocket price change quote state", async () => {
+    const runtime = createRuntime();
+    const internals = runtime as unknown as {
+      quotes: Map<string, Record<string, unknown>>;
+      handleTick(tick: unknown): void;
+    };
+    internals.quotes.set("AAPL", {
+      symbol: "AAPL",
+      info: { symbol: "AAPL", name: "Apple", market: "US", currency: "USD" },
+      market: "US",
+      lastPrice: "180.50",
+      timestamp: "2026-09-07T01:00:00Z",
+      status: "ready",
+      signalMemory: {},
+    });
+
+    internals.handleTick({
+      symbol: "AAPL",
+      market: "US",
+      price: "NaN",
+      timestamp: "2026-09-07T01:01:00Z",
+      currency: "USD",
+    });
+
+    expect(internals.quotes.get("AAPL")).toMatchObject({
+      lastPrice: "180.50",
+      timestamp: "2026-09-07T01:00:00Z",
+      status: "ready",
+    });
     await runtime.destroy();
   });
 });

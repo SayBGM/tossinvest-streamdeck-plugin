@@ -31,6 +31,15 @@ body {
   display: none !important;
 }
 
+.quote-status-note {
+  display: block;
+  margin: 8px 0;
+  color: #ffb020;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 main {
   display: grid;
   gap: 14px;
@@ -402,6 +411,12 @@ button:disabled {
   margin-top: 6px;
 }
 
+.display-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
 .checkbox-row {
   display: flex;
   gap: 14px;
@@ -445,6 +460,15 @@ output {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.resolved-status-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  flex-shrink: 0;
+  margin-left: 10px;
 }
 
 .resolved-main {
@@ -495,6 +519,16 @@ output {
   font-weight: 600;
   color: #00c073;
 }
+
+.resolved-status-connection {
+  font-weight: 500;
+}
+
+.status-connected { color: #00c073; }
+.status-connecting,
+.status-backoff { color: #f5b94c; }
+.status-idle,
+.status-stopped { color: var(--text-muted); }
 
 footer {
   text-align: center;
@@ -609,4 +643,20 @@ a:hover {
 
 .global-fields.collapsed {
   display: none;
+}
+
+@media (max-width: 420px) {
+  .option-grid,
+  .display-grid {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .preview-tab-section {
+    padding: 10px;
+  }
+
+  .preview-box {
+    margin-top: 2px;
+  }
 }

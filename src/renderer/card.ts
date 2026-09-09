@@ -635,6 +635,17 @@ function renderSignalCard(view: QuoteView, signal: Signal): string {
   );
 }
 
+/** A delayed REST quote keeps its price while explaining why it is not live. */
+function renderQuoteNotice(message: string): string {
+  const lines = message.includes("100종목 초과")
+    ? ["실시간 한도 초과", "주기 조회로 표시"]
+    : wrapLines(message, CONTENT_WIDTH, 14, 2);
+  const firstBaseline = lines.length > 1 ? 112 : 122;
+  return lines.map((line, index) =>
+    textNode(line, PAD, firstBaseline + index * 18, 14, COLORS.amber, 600),
+  ).join("\n  ");
+}
+
 export function renderQuoteCard(view: QuoteView): string {
   if (view.signal) {
     return renderSignalCard(view, view.signal);
@@ -672,19 +683,20 @@ export function renderQuoteCard(view: QuoteView): string {
   );
   const changeRow = renderChangeRow(view, metrics, CHANGE_BASELINE, 22, 16);
   const dot = `<circle cx="${DOT_X}" cy="${DOT_Y}" r="3" fill="${dotColor}"/>`;
+  const notice = delayed && view.message ? renderQuoteNotice(view.message) : "";
 
   // 1. 차트 모드: 종목명 / 현재가 / 등락률·등락액 / 스파크라인
   if (viewMode === "chart") {
     const title = fitTitle(view, TITLE_MAX_WIDTH);
     const sparklineSvg =
-      showChart && view.sparkline && view.sparkline.length >= 2
+      !notice && showChart && view.sparkline && view.sparkline.length >= 2
         ? renderSparkline(view.sparkline, metrics.color, CONTENT_WIDTH, 32, PAD, 98)
         : "";
 
     return svgDocument(`${textNode(title.text, PAD, TITLE_BASELINE, title.fontSize, COLORS.text, 700)}
   ${textNode(priceText, PAD, PRICE_BASELINE, priceFit.fontSize, COLORS.price, 800)}
   ${changeRow}
-  ${sparklineSvg}
+  ${notice || sparklineSvg}
   ${dot}`);
   }
 
@@ -705,7 +717,7 @@ export function renderQuoteCard(view: QuoteView): string {
   ${tickerNode}
   ${textNode(priceText, PAD, PRICE_BASELINE, priceFit.fontSize, COLORS.price, 800)}
   ${changeRow}
-  ${renderDayRange(view, metrics.color)}
+  ${notice || renderDayRange(view, metrics.color)}
   ${dot}`);
 }
 

@@ -10,8 +10,10 @@
 - `src/toss/rest-client.ts`: 공식 REST 엔드포인트(`/oauth2/token`, `/api/v1/stocks`, `/prices`, `/candles`)와 그룹별 호출 간격을 관리한다.
 - `src/toss/websocket.ts`: `wss://openapi-ws.tossinvest.com/ws/v1` 하나를 공유하고 full-replace 구독, 60초 PING, 재연결을 담당한다.
 - `src/runtime.ts`: Stream Deck 액션과 API 상태를 연결한다. 여러 키의 같은 종목은 하나의 구독으로 합친다.
+- `src/runtime/`: 종목·거래일 상태, 갱신 요청 조정, 구독 목록과 100종목 한도 판정을 분리한다.
+- `src/toss/response-validation.ts`: 외부 응답에서 플러그인이 사용하는 필드를 검증하고 정상 종목과 손상된 데이터를 분리한다.
 - `src/signals/`: 등락률·상하한가·이평선 시그널을 판단하는 순수 함수 탐지기. 세션(기준가·거래일)당 같은 (레벨/방향) 시그널은 1회만 발화한다.
-- `src/renderer/`: SVG 카드와 전역 30회/초 렌더 커밋 큐. 모든 틱을 그대로 `setImage`로 보내지 않는다.
+- `src/renderer/`: SVG 카드와 전역 10회/초 렌더 커밋 큐. 모든 틱을 그대로 `setImage`로 보내지 않으며, 비동기 커밋은 직렬 처리한다.
 - `com.saybgm.tossinvest.sdPlugin/ui/`: 외부 네트워크 없이 동작하는 Property Inspector.
 
 ## 안전 규칙
@@ -33,7 +35,7 @@ npm run package:plugin
 npm run package:smoke
 ```
 
-`npm run verify`는 위 핵심 검사를 순서대로 실행한다. Stream Deck 실제 설치, macOS/Windows 런타임, 장중 체결, 절전 복귀는 자격증명과 실제 호스트가 필요하므로 실행 여부를 결과에 명시한다.
+`npm run verify`는 타입 검사, 단위 테스트, 빌드를 순서대로 실행한다. `npm run verify:all`은 브라우저 UI 검사를 추가한다. 패키지 생성과 스모크 검사는 별도로 실행한다. Stream Deck 실제 설치, macOS/Windows 런타임, 장중 체결, 절전 복귀는 자격증명과 실제 호스트가 필요하므로 실행 여부를 결과에 명시한다.
 
 ## 릴리스
 

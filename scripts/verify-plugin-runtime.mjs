@@ -1,56 +1,132 @@
 import { spawn } from "node:child_process";
-import { once } from "node:events";
+import { readdirSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import AdmZip from "adm-zip";
 import { WebSocketServer } from "ws";
 
-const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
-await once(server, "listening");
-const address = server.address();
-if (!address || typeof address === "string") throw new Error("fake Stream Deck 호스트 포트를 얻지 못했습니다.");
-const info = JSON.stringify({ application: { version: "7.1", language: "ko" } });
-const pluginDir = resolve("com.saybgm.tossinvest.sdPlugin");
-const child = spawn(process.execPath, [
-  resolve(pluginDir, "bin/plugin.js"),
-  "-port", String(address.port),
-  "-pluginUUID", "com.saybgm.tossinvest",
-  "-registerEvent", "registerPlugin",
-  "-info", info,
-], { cwd: pluginDir, stdio: ["ignore", "pipe", "pipe"] });
-let stdout = "";
-let stderr = "";
-child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
-child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+const dist = resolve("dist");
+const packageName = readdirSync(dist).find((name) => name.endsWith(".streamDeckPlugin"));
+if (!packageName) throw new Error("dist에 .streamDeckPlugin 파일이 없습니다.");
+const packagePath = resolve(dist, packageName);
+const archive = new AdmZip(packagePath);
+const manifestEntry = archive.getEntries().find((entry) => /(^|\/)manifest\.json$/.test(entry.entryName));
+if (!manifestEntry) throw new Error("패키지에 manifest.json이 없습니다.");
+const manifest = JSON.parse(manifestEntry.getData().toString("utf8"));
+if (typeof manifest.CodePath !== "string" || manifest.CodePath.length === 0) throw new Error("manifest.json에 CodePath가 없습니다.");
 
-let registered = false;
-child.on("error", (error) => { stderr += `child error: ${error.message}\n`; });
-child.on("exit", (code, signal) => { stderr += `child exit: ${code}/${signal}\n`; });
-let resolveDone;
-const done = new Promise((resolvePromise) => { resolveDone = resolvePromise; });
-server.on("connection", (socket) => {
-  stdout += "server connection\n";
-  socket.on("message", (raw) => {
-    stdout += `server message: ${raw.toString().slice(0, 120)}\n`;
-    let message;
-    try { message = JSON.parse(raw.toString()); } catch { return; }
-    if (message.event === "registerPlugin" && message.uuid === "com.saybgm.tossinvest") {
-      registered = true;
-      resolveDone();
-    }
-    if (message.event === "getGlobalSettings") {
-      socket.send(JSON.stringify({ event: "didReceiveGlobalSettings", payload: { settings: {} } }));
-    }
-  });
-});
+let extractionDir;
+let server;
+let child;
+let timeout;
+const sockets = new Set();
+let childClosed = Promise.resolve({ code: null, signal: null });
+
+const waitWithTimeout = async (promise, timeoutMs, fallback) => {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolvePromise) => {
+        timer = setTimeout(() => resolvePromise(fallback), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
+const closeServer = async () => {
+  const socketClosures = [...sockets].map((socket) => waitWithTimeout(
+    new Promise((resolvePromise) => {
+      if (socket.readyState === 3) {
+        resolvePromise();
+        return;
+      }
+      socket.once("close", resolvePromise);
+      socket.terminate();
+    }),
+    1_000,
+    undefined,
+  ));
+  await Promise.all(socketClosures);
+  sockets.clear();
+  if (!server) return;
+  if (server.clients) for (const socket of server.clients) socket.terminate();
+  await waitWithTimeout(
+    new Promise((resolvePromise) => {
+      try {
+        server.close(() => resolvePromise());
+      } catch {
+        resolvePromise();
+      }
+    }),
+    1_000,
+    undefined,
+  );
+};
+
+const stopChild = async () => {
+  if (!child) return { code: null, signal: null };
+  if (!child.killed) child.kill("SIGKILL");
+  child.unref();
+  return waitWithTimeout(
+    childClosed,
+    1_000,
+    { code: null, signal: "cleanup-timeout" },
+  );
+};
+
 try {
-  await Promise.race([done, new Promise((_, reject) => setTimeout(() => reject(new Error("fake Stream Deck 등록 timeout")), 5_000))]);
-} catch (error) {
-  child.kill("SIGKILL");
-  await once(child, "close").catch(() => undefined);
-  await new Promise((resolvePromise) => server.close(() => resolvePromise()));
-  throw new Error(`${error instanceof Error ? error.message : error}\nstdout=${stdout}\nstderr=${stderr}`);
+  extractionDir = await mkdtemp(resolve(tmpdir(), "tossinvest-runtime-"));
+  archive.extractAllTo(extractionDir, true);
+  const pluginDir = resolve(extractionDir, manifestEntry.entryName.split("/")[0]);
+  server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  const serverListening = new Promise((resolvePromise, reject) => {
+    server.once("listening", resolvePromise);
+    server.once("error", reject);
+  });
+  await serverListening;
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("fake Stream Deck 호스트 포트를 얻지 못했습니다.");
+
+  let registered = false;
+  let resolveRegistered;
+  let rejectRegistered;
+  const registration = new Promise((resolvePromise, reject) => {
+    resolveRegistered = resolvePromise;
+    rejectRegistered = reject;
+  });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    socket.on("message", (raw) => {
+      let message;
+      try { message = JSON.parse(raw.toString()); } catch { return; }
+      if (message.event === "registerPlugin" && message.uuid === "com.saybgm.tossinvest") {
+        registered = true;
+        resolveRegistered();
+      }
+      if (message.event === "getGlobalSettings") socket.send(JSON.stringify({ event: "didReceiveGlobalSettings", payload: { settings: {} } }));
+    });
+  });
+
+  child = spawn(process.execPath, [resolve(pluginDir, manifest.CodePath), "-port", String(address.port), "-pluginUUID", "com.saybgm.tossinvest", "-registerEvent", "registerPlugin", "-info", JSON.stringify({ application: { version: "7.1", language: "ko" } })], { cwd: pluginDir, stdio: ["ignore", "pipe", "pipe"] });
+  child.stdout.on("data", () => undefined);
+  child.stderr.on("data", () => undefined);
+  childClosed = new Promise((resolvePromise) => {
+    child.once("error", () => resolvePromise({ code: null, signal: "error" }));
+    child.once("close", (code, signal) => resolvePromise({ code, signal }));
+  });
+  child.once("error", () => rejectRegistered(new Error("plugin process error")));
+  child.once("close", (code, signal) => { if (!registered) rejectRegistered(new Error(`plugin exited before registration (${code ?? "unknown"}/${signal ?? "none"})`)); });
+  timeout = setTimeout(() => rejectRegistered(new Error("fake Stream Deck 등록 timeout")), 5_000);
+  await registration;
+  console.log(`bundled plugin registered with fake Stream Deck host: ${packageName}`);
+} finally {
+  if (timeout) clearTimeout(timeout);
+  await stopChild();
+  await closeServer();
+  if (extractionDir) await rm(extractionDir, { recursive: true, force: true });
 }
-child.kill("SIGKILL");
-await once(child, "close");
-await new Promise((resolvePromise) => server.close(() => resolvePromise()));
-if (!registered) throw new Error("plugin registration was not received");
-console.log("bundled plugin registered with fake Stream Deck host");

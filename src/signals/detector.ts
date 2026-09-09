@@ -17,7 +17,9 @@ export interface SignalInput {
 
 export interface SignalMemory {
   sessionKey?: string;
-  firedRateLevels: Set<number>;
+  /** Highest fired 5% level for each direction in the current session. */
+  firedRateUpTo: number;
+  firedRateDownTo: number;
   atUpperLimit: boolean;
   atLowerLimit: boolean;
   maSide: Map<number, "above" | "below">;
@@ -27,7 +29,8 @@ export interface SignalMemory {
 export function createSignalMemory(): SignalMemory {
   return {
     sessionKey: undefined,
-    firedRateLevels: new Set<number>(),
+    firedRateUpTo: 0,
+    firedRateDownTo: 0,
     atUpperLimit: false,
     atLowerLimit: false,
     maSide: new Map<number, "above" | "below">(),
@@ -37,7 +40,8 @@ export function createSignalMemory(): SignalMemory {
 
 function resetMemory(memory: SignalMemory, sessionKey: string): void {
   memory.sessionKey = sessionKey;
-  memory.firedRateLevels = new Set<number>();
+  memory.firedRateUpTo = 0;
+  memory.firedRateDownTo = 0;
   memory.atUpperLimit = false;
   memory.atLowerLimit = false;
   memory.maSide = new Map<number, "above" | "below">();
@@ -87,9 +91,9 @@ function evaluateLimit(
 
 /**
  * ±5% rate-level detection with no cap (35%, 40%, ... all valid). A level
- * jump (5% -> 15%) fires only the level actually reached, and every
- * intermediate level of the same sign is marked fired at once so it never
- * separately fires later. Retreating and re-crossing an already-fired level
+ * jump (5% -> 15%) fires only the level actually reached, and the highest
+ * reached level of that sign represents all intermediate levels so they never
+ * separately fire later. Retreating and re-crossing an already-fired level
  * never re-fires it.
  */
 function evaluateRate(
@@ -108,8 +112,8 @@ function evaluateRate(
   const absLevel = Math.floor(Math.abs(rate) / 5);
   if (sign === 0 || absLevel === 0) return undefined;
 
-  const level = sign * absLevel;
-  if (memory.firedRateLevels.has(level)) return undefined;
+  const highestFiredLevel = sign > 0 ? memory.firedRateUpTo : memory.firedRateDownTo;
+  if (absLevel <= highestFiredLevel) return undefined;
 
   let candidate: Signal | undefined;
   if (!arm) {
@@ -123,9 +127,8 @@ function evaluateRate(
     };
   }
 
-  for (let i = 1; i <= absLevel; i += 1) {
-    memory.firedRateLevels.add(sign * i);
-  }
+  if (sign > 0) memory.firedRateUpTo = absLevel;
+  else memory.firedRateDownTo = absLevel;
 
   return candidate;
 }
