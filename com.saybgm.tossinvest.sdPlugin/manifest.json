@@ -3,7 +3,7 @@
   "Author": "SayBGM",
   "Name": "TossInvest",
   "Description": "토스증권 Open API로 국내·미국 주식 현재가를 표시하는 비공식 플러그인",
-  "Version": "0.3.0.0",
+  "Version": "0.3.1.0",
   "Icon": "imgs/plugin-icon",
   "UUID": "com.saybgm.tossinvest",
   "SDKVersion": 3,

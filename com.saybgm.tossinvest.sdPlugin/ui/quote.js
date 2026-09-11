@@ -14,6 +14,7 @@
     globalDraftDirty: false,
   };
   var pendingRequests = {};
+  var ipNotAllowedMessage = "WTS에서 현재 IP를 허용해 주세요.";
 
   var $ = function (id) {
     return document.getElementById(id);
@@ -29,6 +30,14 @@
     if (!el) return;
     el.textContent = text || "";
     el.style.color = error ? "#F04452" : "#00C073";
+    if (id === "globalStatus") {
+      var supportLink = $("openTossInvest");
+      if (supportLink) {
+        supportLink.hidden = !(
+          error && text === ipNotAllowedMessage
+        );
+      }
+    }
   };
 
   var setBusy = function (scope, busy) {

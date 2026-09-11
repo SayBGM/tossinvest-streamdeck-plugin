@@ -1,6 +1,6 @@
 {
   "name": "tossinvest-streamdeck-plugin",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Unofficial Toss Securities quote plugin for Stream Deck",
   "type": "module",
   "private": true,

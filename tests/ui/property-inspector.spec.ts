@@ -197,6 +197,27 @@ test("인증 실패는 설정 단계를 열지 않고 해당 영역에만 표시
   await expect(page.getByRole("button", { name: "저장 및 연결 확인" })).toBeEnabled();
 });
 
+test("IP 허용 오류에서만 토스증권 홈페이지 링크를 표시한다", async ({ page }) => {
+  await openInspector(page);
+  await initialize(page, false);
+
+  await page.getByLabel("Client ID").fill("candidate-client");
+  await page.getByLabel("Client Secret").fill("candidate-secret");
+  await page.getByRole("button", { name: "저장 및 연결 확인" }).click();
+  const save = await latestCommand(page, "global/save");
+
+  await respond(page, {
+    requestId: save.requestId,
+    ok: false,
+    message: "WTS에서 현재 IP를 허용해 주세요.",
+  });
+
+  const link = page.getByRole("link", { name: "토스증권 열기" });
+  await expect(link).toBeVisible();
+  await expect(link).toHaveAttribute("href", "https://www.tossinvest.com/");
+  await expect(link).toHaveAttribute("target", "_blank");
+});
+
 test("잘못된 종목은 기존 확정 설정을 보존하고 성공한 최신 종목만 저장한다", async ({ page }) => {
   const samsung = {
     schemaVersion: 1,
